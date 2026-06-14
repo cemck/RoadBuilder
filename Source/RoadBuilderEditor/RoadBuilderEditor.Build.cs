@@ -34,6 +34,7 @@ namespace UnrealBuildTool.Rules
 					"GeometryCore",
                     "InputCore",
 					"MainFrame",
+					"PropertyEditor",
 					"RenderCore",
 					"RoadBuilder",
                     "Slate",

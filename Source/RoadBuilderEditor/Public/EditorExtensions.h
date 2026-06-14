@@ -3,6 +3,8 @@
 
 #pragma once
 #include "CoreMinimal.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
 
 class FEditorExtensions : public TSharedFromThis<FEditorExtensions>
 {

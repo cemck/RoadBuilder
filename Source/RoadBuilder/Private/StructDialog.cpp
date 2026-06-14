@@ -4,8 +4,12 @@
 #include "StructDialog.h"
 #if WITH_EDITOR
 #include "SlateOptMacros.h"
+#include "IDetailsView.h"
+#include "PropertyEditorModule.h"
 #include "UnrealEdGlobals.h"
 #include "Editor/UnrealEdEngine.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/SBoxPanel.h"
 #define LOCTEXT_NAMESPACE "RoadBuilder"
 BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 void SObjectDialog::Construct(const FArguments& InArgs)

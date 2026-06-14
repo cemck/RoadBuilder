@@ -41,6 +41,8 @@ namespace UnrealBuildTool.Rules
 					new string[]
 					{
 						"DesktopPlatform",
+						"MainFrame",
+						"PropertyEditor",
 						"Slate",
 						"SlateCore",
 						"UnrealEd",

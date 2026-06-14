@@ -16,7 +16,7 @@
 #include "RoadMesh.h"
 #include "IContentBrowserDataModule.h"
 #include "ContentBrowserDataSubsystem.h"
-#include "Settings.h"
+#include "RoadBuilderSettings.h"
 #include "StructDialog.h"
 
 THIRD_PARTY_INCLUDES_START

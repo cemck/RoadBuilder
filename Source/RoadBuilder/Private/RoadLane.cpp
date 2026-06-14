@@ -2,7 +2,7 @@
 // Copyright 2024. All Rights Reserved.
 
 #include "RoadLane.h"
-#include "Settings.h"
+#include "RoadBuilderSettings.h"
 
 ULaneShape* FLaneSegment::GetLaneShape()
 {

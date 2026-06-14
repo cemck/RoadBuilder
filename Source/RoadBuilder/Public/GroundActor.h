@@ -34,13 +34,13 @@ struct ROADBUILDER_API FGroundPoint
 		return HashCombineFast(GetTypeHash(Point.Road), GetTypeHash(Point.Side << 16 | Point.Index));
 	}
 	UPROPERTY()
-	ARoadActor* Road;
+	ARoadActor* Road = nullptr;
 
 	UPROPERTY()
-	int Side;
+	int Side = 0;
 
 	UPROPERTY()
-	int Index;
+	int Index = INDEX_NONE;
 };
 
 UCLASS()

@@ -3,6 +3,8 @@
 
 #include "OSMVisualizer.h"
 #include "StructDialog.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "SceneManagement.h"
 
 IMPLEMENT_HIT_PROXY(HOSMVisProxy, HComponentVisProxy);
 

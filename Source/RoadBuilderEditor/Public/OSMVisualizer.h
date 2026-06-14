@@ -4,6 +4,7 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "ComponentVisualizer.h"
+#include "PrimitiveDrawInterface.h"
 #include "OSMActor.h"
 
 struct HOSMVisProxy : public HComponentVisProxy

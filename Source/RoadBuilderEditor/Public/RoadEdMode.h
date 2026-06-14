@@ -5,6 +5,7 @@
 #include "EditorModeTools.h"
 #include "EditorModeManager.h"
 #include "EdMode.h"
+#include "Misc/NotifyHook.h"
 #include "RoadActor.h"
 #include "RoadScene.h"
 

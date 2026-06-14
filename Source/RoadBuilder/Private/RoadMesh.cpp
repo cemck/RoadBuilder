@@ -2,7 +2,7 @@
 // Copyright 2024. All Rights Reserved.
 
 #include "RoadMesh.h"
-#include "Settings.h"
+#include "RoadBuilderSettings.h"
 #include "Components/DecalComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"

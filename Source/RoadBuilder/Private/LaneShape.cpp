@@ -2,7 +2,7 @@
 // Copyright 2024. All Rights Reserved.
 
 #include "LaneShape.h"
-#include "Settings.h"
+#include "RoadBuilderSettings.h"
 
 UMaterialInterface* ULaneShape::GetSurfaceMaterial()
 {

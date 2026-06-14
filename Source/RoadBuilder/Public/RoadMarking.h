@@ -30,7 +30,7 @@ public:
 	UStaticMesh* Mesh = nullptr;
 
 	UPROPERTY(EditAnywhere, Category = Point)
-	FVector2D Point;
+	FVector2D Point = FVector2D::ZeroVector;
 };
 
 USTRUCT()
@@ -55,7 +55,7 @@ struct FMarkingCurvePoint
 		*(&Pos + Index) += Delta;
 	}
 	UPROPERTY(EditAnywhere, Category = Point)
-	FVector2D Pos;
+	FVector2D Pos = FVector2D::ZeroVector;
 
 	UPROPERTY(EditAnywhere, Category = Point)
 	FVector2D In = FVector2D::ZeroVector;
@@ -87,7 +87,7 @@ public:
 	void SetPoints(TArray<FVector2D>& UVs);
 	FPolyline CreatePolyline();
 
-	UPROPERTY(EditAnywhere, Category = Style, meta = (DisallowedClasses = "PolygonMarkStyle"))
+	UPROPERTY(EditAnywhere, Category = Style, meta = (DisallowedClasses = "/Script/RoadBuilder.PolygonMarkStyle"))
 	UBaseMarkStyle* MarkStyle = nullptr;
 
 	UPROPERTY(EditAnywhere, Category = Style, meta = (EditCondition = "bClosedLoop"))

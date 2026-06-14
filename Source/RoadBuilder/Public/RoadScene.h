@@ -4,7 +4,7 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "Math/GenericOctree.h"
-#include "Settings.h"
+#include "RoadBuilderSettings.h"
 #include "GroundActor.h"
 #include "RoadScene.generated.h"
 
@@ -139,25 +139,25 @@ struct FJunctionGate
 	void Renew(double D, double S);
 
 	UPROPERTY()
-	ARoadActor* Road;
+	ARoadActor* Road = nullptr;
 
 	UPROPERTY()
-	double Radian;
+	double Radian = 0;
 
 	UPROPERTY()
-	double Sign;
+	double Sign = 0;
 
 	UPROPERTY()
-	double InitDist;
+	double InitDist = 0;
 
 	UPROPERTY()
-	double Dist;
+	double Dist = 0;
 
 	UPROPERTY()
-	double CornerDists[2];
+	double CornerDists[2] = { 0, 0 };
 
 	UPROPERTY()
-	double CutDists[2];
+	double CutDists[2] = { 0, 0 };
 
 	UPROPERTY()
 	TArray<FJunctionLink> Links;
@@ -220,11 +220,23 @@ public:
 	TArray<FPolyline> DebugCurves;
 };
 
-UCLASS()
+UCLASS(BlueprintType, Blueprintable)
 class ROADBUILDER_API ARoadScene : public AActor
 {
 	GENERATED_UCLASS_BODY()
 public:
+	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
+	ARoadActor* RuntimeCreateRoad(const TArray<FVector>& WorldPoints, URoadStyle* Style = nullptr, bool bRebuildScene = true);
+
+	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
+	bool RuntimeDestroyRoad(ARoadActor* Road, bool bRebuildScene = true);
+
+	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
+	void RuntimeRebuild();
+
+	UFUNCTION(BlueprintPure, Category = "RoadBuilder|Runtime")
+	TArray<ARoadActor*> RuntimeGetRoads() const { return Roads; }
+
 	ARoadActor* AddRoad();
 	ARoadActor* AddRoad(URoadStyle* Style, double Height);
 	ARoadActor* DuplicateRoad(ARoadActor* Source);
@@ -235,6 +247,7 @@ public:
 	TArray<FJunctionSlot> GetJunctionSlots(ARoadActor* Road);
 //	FVector2D GetRoadUV(ARoadActor* Road, const FVector& Pos);
 	void Rebuild();
+	void RemoveInvalidReferences();
 	void GenerateGrounds(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots);
 	void OctreeAddBoundary(URoadBoundary* Boundary);
 	void OctreeRemoveBoundary(URoadBoundary* Boundary);
@@ -246,13 +259,13 @@ public:
 	void ExportXodr();
 #endif
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly, Category = "RoadBuilder|Runtime")
 	TArray<ARoadActor*> Roads;
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly, Category = "RoadBuilder|Runtime")
 	TArray<AJunctionActor*> Junctions;
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly, Category = "RoadBuilder|Runtime")
 	TArray<AGroundActor*> Grounds;
 
 	TOctree2<FRoadOctreeElement, FRoadOctreeSemantics> Octree;

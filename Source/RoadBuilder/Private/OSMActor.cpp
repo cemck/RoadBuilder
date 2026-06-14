@@ -3,7 +3,7 @@
 
 #include "OSMActor.h"
 #include "RoadScene.h"
-#include "Settings.h"
+#include "RoadBuilderSettings.h"
 #include "HttpModule.h"
 #include "Engine/World.h"
 #include "Interfaces/IHttpRequest.h"
