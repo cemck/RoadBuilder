@@ -1,4 +1,4 @@
-# RoadBuilder Plugin — Step-by-Step Guide
+# RoadBuilder Plugin â€” Step-by-Step Guide
 
 ## Table of Contents
 1. [Create Your Materials](#1-create-your-materials)
@@ -56,7 +56,7 @@ Right-click inside `RoadMaterials` ? **Material** for each:
 
 ## 2. Create a Road Preset
 
-A **Road Preset** is the new simplified way to define a road. One asset controls everything — lane count, sidewalks, materials, markings.
+A **Road Preset** is the new simplified way to define a road. One asset controls everything â€” lane count, sidewalks, materials, markings.
 
 ### Step 1: Create the Preset asset
 1. In Content Browser, right-click ? **RoadBuilder** ? **Road Preset**
@@ -94,11 +94,11 @@ Press `Ctrl+S` to save.
 When you place a road with this preset, it auto-generates:
 ```
 Center: Yellow double-solid line (YellowSolidSolid)
-Right side (your direction):
+Physical right side (traffic direction comes from the RoadScene setting):
   Lane 1: 350cm driving lane ? white dashed boundary
   Lane 2: 350cm driving lane ? white solid boundary
   Sidewalk: 200cm raised sidewalk with curb
-Left side (oncoming):
+Physical left side (traffic direction comes from the RoadScene setting):
   Lane 1: 350cm driving lane ? white dashed boundary
   Lane 2: 350cm driving lane ? white solid boundary
   Sidewalk: 200cm raised sidewalk with curb
@@ -191,9 +191,9 @@ Traffic lights are auto-generated when your **Preset** has `Traffic Control` set
 
 ### What gets generated
 For each input gate (each approach direction), the plugin spawns an `ATrafficLightActor`:
-- **PoleMesh** — the traffic light pole (assign a mesh in Settings ? `TrafficLightMesh`)
-- **StopVolume** — a `BoxComponent` (400cm wide) that AI vehicles can detect
-- **Phase offset** — opposing directions auto-alternate (green/red swap)
+- **PoleMesh** â€” the traffic light pole (assign a mesh in Settings ? `TrafficLightMesh`)
+- **StopVolume** â€” a `BoxComponent` (400cm wide) that AI vehicles can detect
+- **Phase offset** â€” opposing directions auto-alternate (green/red swap)
 
 ### Traffic Light Properties
 Select a traffic light in the viewport or World Outliner to edit:
@@ -231,7 +231,7 @@ On Tick:
 2. Set **Traffic Light Mesh** to your traffic light static mesh
 3. Rebuild ? the mesh appears at each junction approach
 
-> **Don't have a mesh?** The traffic light still works without one — the StopVolume and state machine are fully functional. You can add a mesh later.
+> **Don't have a mesh?** The traffic light still works without one â€” the StopVolume and state machine are fully functional. You can add a mesh later.
 
 ---
 
@@ -243,8 +243,8 @@ Same as traffic lights but with a different type:
 1. Select a `JunctionActor` in World Outliner
 2. Set **Traffic Control Type** ? `Stop Sign`
 3. Each input gate gets an `ATrafficSignActor` with:
-   - **SignMesh** — the stop sign mesh (set in Settings ? `StopSignMesh`)
-   - **DetectionVolume** — BoxComponent for AI detection
+   - **SignMesh** â€” the stop sign mesh (set in Settings ? `StopSignMesh`)
+   - **DetectionVolume** â€” BoxComponent for AI detection
    - `IsStopSign()` returns `true`
 
 ### Yield Signs (for T-intersections)
@@ -280,8 +280,8 @@ Turn arrows are road-surface markings that show drivers which direction each lan
 
 ### How arrows are determined
 The plugin calculates the angle between each input gate and each reachable output gate:
-- **Angle > 30°** ? Left arrow
-- **Angle < -30°** ? Right arrow
+- **Angle > 30Â°** ? Left arrow
+- **Angle < -30Â°** ? Right arrow
 - **In between** ? Through (straight) arrow
 
 ### Arrow types available
@@ -289,9 +289,9 @@ Each `ATurnArrowActor` has an `ArrowType` property:
 
 | Type | Visual | When used |
 |------|--------|-----------|
-| `Left` | ? | Turn is > 30° to the left |
+| `Left` | ? | Turn is > 30Â° to the left |
 | `Through` | ? | Roughly straight ahead |
-| `Right` | ? | Turn is > 30° to the right |
+| `Right` | ? | Turn is > 30Â° to the right |
 | `LeftThrough` | ?? | Available for manual override |
 | `ThroughRight` | ?? | Available for manual override |
 | `LeftRight` | ?? | Available for manual override |
@@ -403,10 +403,10 @@ To find built-in assets:
 ### Built-in assets
 
 **Lane Shapes** (in `RoadBuilder Content/LaneShapes/`):
-- `Driving` — flat road surface
-- `Sidewalk` — raised with curb
-- `Median` — center median
-- `Driving-Elevated` — elevated with barriers
+- `Driving` â€” flat road surface
+- `Sidewalk` â€” raised with curb
+- `Median` â€” center median
+- `Driving-Elevated` â€” elevated with barriers
 
 **Mark Styles** (in `RoadBuilder Content/MarkStyles/LaneMark/`):
 - `WhiteDash`, `WhiteSolid`, `WhiteSolidSolid`, etc.
@@ -438,7 +438,7 @@ To find built-in assets:
 | **Lane** | Edit, Carve, Width | Edit individual lanes |
 | **Marking** | Lane, Point, Curve | Add road markings |
 | **Ground** | Edit | Edit ground patches |
-| **Settings** | — | Global settings |
+| **Settings** | â€” | Global settings |
 
 ### Settings Tab Reference
 
@@ -450,6 +450,7 @@ To find built-in assets:
 | **DefaultSolidStyle** | Default solid line marking |
 | **DefaultGroundMaterial** | Material for ground patches |
 | **UVScale** | Texture tiling (default: 0.001) |
+| **Project Traffic Handedness** | Default RHT/LHT rule inherited by RoadScenes without an override |
 | **BuildJunctions** | Auto-build junctions |
 | **BuildProps** | Generate road props |
 | **BuildMassGraph** | Generate ZoneGraph for AI |
@@ -460,6 +461,12 @@ To find built-in assets:
 | **YieldSignMesh** | Mesh for yield signs |
 | **TurnArrowMesh** | Mesh for turn direction arrows |
 | **NoTurnSignMesh** | Mesh for no-turn restriction signs |
+
+### Traffic handedness
+
+`RightLanes` and `LeftLanes` always mean the physical side of the road reference spline. They do not hard-code traffic direction. In RHT, physical right lanes follow increasing spline distance; in LHT, physical left lanes do.
+
+The Settings tab shows both the project default and the active RoadScene override. The active RoadScene is the owner of the most recently selected road or junction. Changing either value does not rebuild anything automatically. Use **Apply Active RoadScene** or **Apply All Loaded RoadScenes**, then save the level and external actors. In a World Partition map, load every sector that should be rebuilt before using the all-loaded action.
 
 ### Actor Types
 

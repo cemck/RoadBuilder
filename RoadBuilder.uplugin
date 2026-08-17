@@ -7,10 +7,10 @@
 	"Category": "Modeling",
 	"CreatedBy": "Fullike",
 	"CreatedByURL": "https://github.com/fullike/RoadBuilder",
-	"DocsURL": "",
+	"DocsURL": "https://github.com/Denalgus2/RoadBuilder/blob/master/Docs/Tutorial.md",
 	"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/product/be3bd259012f46fb9ca86a6cd9e9ec97",
-	"SupportURL": "https://github.com/fullike/RoadBuilder",
-	"EngineVersion": "5.7.0",
+	"SupportURL": "https://github.com/Denalgus2/RoadBuilder",
+	"EngineVersion": "5.8.0",
 	"CanContainContent": true,
 	"Installed": true,
 	"Modules": [

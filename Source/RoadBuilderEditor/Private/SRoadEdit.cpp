@@ -33,6 +33,7 @@ void SRoadEdit::Construct(const FArguments& InArgs)
 	SettingsView = PropertyEditorModule.CreateDetailView(Args);
 	SettingsView->RegisterInstancedCustomPropertyLayout(UObject::StaticClass(), FOnGetDetailCustomizationInstance::CreateStatic(&FObjectDetails::MakeInstance));
 	ObjectDetailsView = PropertyEditorModule.CreateDetailView(Args);
+	ObjectDetailsView->RegisterInstancedCustomPropertyLayout(UObject::StaticClass(), FOnGetDetailCustomizationInstance::CreateStatic(&FObjectDetails::MakeInstance));
 	FStructureDetailsViewArgs StructureViewArgs;
 	StructureViewArgs.bShowObjects = true;
 	StructureViewArgs.bShowInterfaces = true;
@@ -274,7 +275,12 @@ void SRoadEdit::SetToolIndex(int Index)
 	else if (Index == FEdModeRoad::RoadSplit)
 		SettingsView->SetObject(GetMutableDefault<USettings_RoadSplit>());
 	else if (Index == FEdModeRoad::Settings)
+	{
 		SettingsView->SetObject(GetMutableDefault<USettings_Global>());
+		ObjectDetailsView->SetObject(RoadEditMode->Scene);
+		ObjectDetailsView->SetVisibility(EVisibility::Visible);
+		StructDetailsView->GetWidget()->SetVisibility(EVisibility::Collapsed);
+	}
 	else
 		SettingsView->SetObject(nullptr);
 }

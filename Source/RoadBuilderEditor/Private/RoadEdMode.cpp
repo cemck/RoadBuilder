@@ -182,6 +182,15 @@ bool FRoadTool::HandleClickRoad(HHitProxy* HitProxy, const FViewportClick& Click
 		if (HRoadProxy* Proxy = HitProxyCast<HRoadProxy>(HitProxy))
 		{
 			SelectedRoad = Proxy->Road;
+			// World Partition levels can contain many independent RoadScenes.
+			// Keep the editor tool scoped to the scene that owns the clicked road.
+			if (FEdModeRoad* RoadMode = FEdModeRoad::Get())
+			{
+				if (ARoadScene* OwningScene = Proxy->Road->GetScene())
+				{
+					RoadMode->Scene = OwningScene;
+				}
+			}
 			if (PointIndex)
 				*PointIndex = Proxy->Index;
 			return true;
@@ -204,6 +213,13 @@ bool FRoadTool::HandleClickJunction(HHitProxy* HitProxy, const FViewportClick& C
 		if (HJunctionProxy* Proxy = HitProxyCast<HJunctionProxy>(HitProxy))
 		{
 			SelectedJunction = Proxy->Junction;
+			if (FEdModeRoad* RoadMode = FEdModeRoad::Get())
+			{
+				if (ARoadScene* OwningScene = Proxy->Junction->GetScene())
+				{
+					RoadMode->Scene = OwningScene;
+				}
+			}
 			if (GateIndex)
 				*GateIndex = Proxy->Index;
 			if (LinkIndex)
@@ -261,54 +277,66 @@ void FRoadTool::DrawRoads(FPrimitiveDrawInterface* PDI, bool DrawLinks)
 	}
 
 	ARoadActor* SelectedRoad = GetSelectedRoad();
-	ARoadScene* Scene = GetScene();
-	if (!IsValid(Scene))
+	ARoadScene* ActiveScene = GetScene();
+	UWorld* World = IsValid(ActiveScene) ? ActiveScene->GetWorld() : nullptr;
+	if (!World)
 	{
 		return;
 	}
 
-	Scene->RemoveInvalidReferences();
-	for (ARoadActor* Road : Scene->Roads)
+	// Draw every loaded World Partition sector. Unloaded sectors remain streamed
+	// out; loading their cells makes their editable curves appear immediately.
+	for (TActorIterator<ARoadScene> SceneIt(World); SceneIt; ++SceneIt)
 	{
-		if (!IsValid(Road))
+		ARoadScene* Scene = *SceneIt;
+		if (!IsValid(Scene))
 		{
 			continue;
 		}
 
-		PDI->SetHitProxy(new HRoadProxy(Road));
-		FColor Color = Road == SelectedRoad ? Color_Select : Color_Road;
-		if (Road->RoadPoints.Num() == 1)
-			PDI->DrawPoint(Road->GetPos(0), Color, Size_Point, SDPG_Foreground);
-		else if (Road->BaseCurve)
-			DrawCurve(PDI, Road->BaseCurve->Curve, Color, Thickness_Road, Road == SelectedRoad ? DepthBias_Select : 0);
-	}
-	if (DrawLinks)
-	{
-		for (AJunctionActor* Junction : Scene->Junctions)
+		Scene->RemoveInvalidReferences();
+		for (ARoadActor* Road : Scene->Roads)
 		{
-			if (!IsValid(Junction))
+			if (!IsValid(Road))
 			{
 				continue;
 			}
 
-			for (FJunctionGate& Gate : Junction->Gates)
+			PDI->SetHitProxy(new HRoadProxy(Road));
+			FColor Color = Road == SelectedRoad ? Color_Select : Color_Road;
+			if (Road->RoadPoints.Num() == 1)
+				PDI->DrawPoint(Road->GetPos(0), Color, Size_Point, SDPG_Foreground);
+			else if (Road->BaseCurve)
+				DrawCurve(PDI, Road->BaseCurve->Curve, Color, Thickness_Road, Road == SelectedRoad ? DepthBias_Select : 0);
+		}
+		if (DrawLinks)
+		{
+			for (AJunctionActor* Junction : Scene->Junctions)
 			{
-				for (int i = 0; i < Gate.Links.Num(); i++)
+				if (!IsValid(Junction))
 				{
-					if (ARoadActor* Road = Gate.Links[i].Road)
-					{
-						if (!IsValid(Road) || !Road->BaseCurve)
-						{
-							continue;
-						}
+					continue;
+				}
 
-						if (URoadCurve* Curve = (i == 1) ? (URoadCurve*)Road->BaseCurve : (URoadCurve*)Road->BaseCurve->RightLane)
+				for (FJunctionGate& Gate : Junction->Gates)
+				{
+					for (int i = 0; i < Gate.Links.Num(); i++)
+					{
+						if (ARoadActor* Road = Gate.Links[i].Road)
 						{
-							PDI->SetHitProxy(new HRoadProxy(Road));
-							DrawCurve(PDI, Curve->Curve, (Road == SelectedRoad) ? Color_Select : Color_Road, Thickness_Road, Road == SelectedRoad ? DepthBias_Select : 0);
+							if (!IsValid(Road) || !Road->BaseCurve)
+							{
+								continue;
+							}
+
+							if (URoadCurve* Curve = (i == 1) ? (URoadCurve*)Road->BaseCurve : (URoadCurve*)Road->BaseCurve->RightLane)
+							{
+								PDI->SetHitProxy(new HRoadProxy(Road));
+								DrawCurve(PDI, Curve->Curve, (Road == SelectedRoad) ? Color_Select : Color_Road, Thickness_Road, Road == SelectedRoad ? DepthBias_Select : 0);
+							}
 						}
 					}
-				}
+			}
 			}
 		}
 	}
@@ -399,19 +427,28 @@ void FRoadTool::DrawJunction(FPrimitiveDrawInterface* PDI, AJunctionActor* Junct
 
 void FRoadTool::DrawJunctions(FPrimitiveDrawInterface* PDI)
 {
-	ARoadScene* Scene = GetScene();
-	if (!IsValid(Scene))
+	ARoadScene* ActiveScene = GetScene();
+	UWorld* World = IsValid(ActiveScene) ? ActiveScene->GetWorld() : nullptr;
+	if (!World)
 	{
 		return;
 	}
 
-	Scene->RemoveInvalidReferences();
 	AJunctionActor* SelectedJunction = GetSelectedJunction();
-	for (AJunctionActor* Junction : Scene->Junctions)
+	for (TActorIterator<ARoadScene> SceneIt(World); SceneIt; ++SceneIt)
 	{
-		if (IsValid(Junction))
+		ARoadScene* Scene = *SceneIt;
+		if (!IsValid(Scene))
 		{
-			DrawJunction(PDI, Junction, (Junction == SelectedJunction) ? Color_Select : Color_Road);
+			continue;
+		}
+		Scene->RemoveInvalidReferences();
+		for (AJunctionActor* Junction : Scene->Junctions)
+		{
+			if (IsValid(Junction))
+			{
+				DrawJunction(PDI, Junction, (Junction == SelectedJunction) ? Color_Select : Color_Road);
+			}
 		}
 	}
 }

@@ -5,6 +5,7 @@
 #include "RoadScene.h"
 #include "Components/SplineComponent.h"
 #include "Engine/World.h"
+#include "PCGComponent.h"
 
 double FGroundPoint::GetDist(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots)
 {

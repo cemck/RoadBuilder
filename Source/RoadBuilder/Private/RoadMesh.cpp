@@ -40,7 +40,10 @@ UStaticMesh* FStaticRoadMesh::CreateMesh(UObject* Outer, FName Name, EObjectFlag
 		}
 		TArray<const FMeshDescription*> Descs = { MeshDescription.Get() };
 		UStaticMesh::FBuildMeshDescriptionsParams Params;
-		Params.bFastBuild = true;
+		// These meshes are persisted as OFPA actor subobjects in editor worlds.
+		// Use the normal editor build path so serialized render-data bounds are
+		// fully validated; the fast path is intended primarily for runtime builds.
+		Params.bFastBuild = false;
 		Params.bAllowCpuAccess = true;
 	//	Params.bCommitMeshDescription = false;
 		Params.PerLODOverrides = { {true, true} };

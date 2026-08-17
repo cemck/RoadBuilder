@@ -262,6 +262,32 @@ class ROADBUILDER_API ARoadScene : public AActor
 {
 	GENERATED_UCLASS_BODY()
 public:
+	UFUNCTION(BlueprintPure, Category = "RoadBuilder|Traffic")
+	ERoadTrafficHandedness GetResolvedTrafficHandedness() const;
+
+	UFUNCTION(BlueprintPure, Category = "RoadBuilder|Traffic")
+	bool IsLeftHandTraffic() const { return GetResolvedTrafficHandedness() == ERoadTrafficHandedness::LeftHandTraffic; }
+
+	UFUNCTION(BlueprintPure, Category = "RoadBuilder|Traffic")
+	bool IsTrafficHandednessApplied() const;
+
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "RoadBuilder|Traffic", meta = (DisplayName = "Apply Traffic Handedness"))
+	void ApplyTrafficHandedness();
+
+	int32 GetForwardTrafficSide() const;
+	int32 GetReverseTrafficSide() const;
+	int32 GetTrafficSideForDirection(double DirectionSign) const;
+	double GetTrafficDirectionSignForSide(int32 Side) const;
+	FString GetOpenDriveTrafficRule() const;
+
+	static int32 ResolveTrafficSide(ERoadTrafficHandedness Handedness, double DirectionSign);
+	static double ResolveTrafficDirectionSign(ERoadTrafficHandedness Handedness, int32 Side);
+	static ERoadTrafficHandedness ResolveTrafficHandedness(
+		bool bUseSceneOverride,
+		ERoadTrafficHandedness SceneHandedness,
+		ERoadTrafficHandedness ProjectHandedness);
+	static FString ToOpenDriveTrafficRule(ERoadTrafficHandedness Handedness);
+
 	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
 	ARoadActor* RuntimeCreateRoad(const TArray<FVector>& WorldPoints, URoadStyle* Style = nullptr, bool bRebuildScene = true);
 
@@ -293,6 +319,7 @@ public:
 	void OctreeAddRoad(ARoadActor* Road);
 	void OctreeRemoveRoad(ARoadActor* Road);
 	void DestroyRoad(ARoadActor* Road);
+	void ResetTrafficDerivedData();
 	virtual void PostLoad() override;
 #if WITH_EDITOR
 	void ExportXodr();
@@ -307,8 +334,20 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "RoadBuilder|Runtime")
 	TArray<AGroundActor*> Grounds;
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly, Category = "RoadBuilder|MassGraph")
 	TArray<AActor*> MassGraphActors;
+
+	UPROPERTY(EditAnywhere, Category = "RoadBuilder|Traffic", meta = (DisplayName = "Override Project Traffic Handedness"))
+	bool bOverrideTrafficHandedness = false;
+
+	UPROPERTY(EditAnywhere, Category = "RoadBuilder|Traffic", meta = (EditCondition = "bOverrideTrafficHandedness"))
+	ERoadTrafficHandedness TrafficHandedness = ERoadTrafficHandedness::RightHandTraffic;
+
+	UPROPERTY()
+	bool bTrafficHandednessInitialized = false;
+
+	UPROPERTY()
+	ERoadTrafficHandedness LastBuiltTrafficHandedness = ERoadTrafficHandedness::RightHandTraffic;
 
 	TOctree2<FRoadOctreeElement, FRoadOctreeSemantics> Octree;
 };

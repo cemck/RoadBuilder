@@ -10,6 +10,13 @@
 #include "RoadPreset.h"
 #include "RoadBuilderSettings.generated.h"
 
+UENUM(BlueprintType)
+enum class ERoadTrafficHandedness : uint8
+{
+	RightHandTraffic	UMETA(DisplayName = "Right-Hand Traffic"),
+	LeftHandTraffic		UMETA(DisplayName = "Left-Hand Traffic"),
+};
+
 UCLASS(config = RoadBuilder)
 class ROADBUILDER_API USettings_Base : public UObject
 {
@@ -25,6 +32,17 @@ class ROADBUILDER_API USettings_Global : public USettings_Base
 {
 	GENERATED_UCLASS_BODY()
 public:
+	UPROPERTY(config, EditAnywhere, Category = Traffic, meta = (DisplayName = "Project Traffic Handedness"))
+	ERoadTrafficHandedness DefaultTrafficHandedness = ERoadTrafficHandedness::RightHandTraffic;
+
+#if WITH_EDITOR
+	UFUNCTION(CallInEditor, Category = Traffic, meta = (DisplayName = "Apply Active RoadScene"))
+	void ApplyActiveRoadSceneTrafficHandedness();
+
+	UFUNCTION(CallInEditor, Category = Traffic, meta = (DisplayName = "Apply All Loaded RoadScenes"))
+	void ApplyAllLoadedRoadScenesTrafficHandedness();
+#endif
+
 	UPROPERTY(config, EditAnywhere, Category = Build)
 	TSoftObjectPtr<ULaneShape> DefaultDrivingShape;
 

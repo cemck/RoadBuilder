@@ -7,6 +7,7 @@
 #if WITH_EDITOR
 #include "ScopedTransaction.h"
 #include "RoadBuilderEditor/Public/RoadEdMode.h"
+#include "EngineUtils.h"
 void USettings_Base::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	if (PropertyChangedEvent.MemberProperty)
@@ -43,6 +44,41 @@ USettings_RoadPlan::USettings_RoadPlan(const FObjectInitializer& ObjectInitializ
 }
 
 #if WITH_EDITOR
+void USettings_Global::ApplyActiveRoadSceneTrafficHandedness()
+{
+	if (FEdModeRoad* RoadMode = FEdModeRoad::Get())
+	{
+		if (ARoadScene* Scene = RoadMode->Scene)
+		{
+			const FScopedTransaction Transaction(FText::FromString(TEXT("Apply RoadScene Traffic Handedness")));
+			Scene->Modify();
+			Scene->ApplyTrafficHandedness();
+		}
+	}
+}
+
+void USettings_Global::ApplyAllLoadedRoadScenesTrafficHandedness()
+{
+	FEdModeRoad* RoadMode = FEdModeRoad::Get();
+	ARoadScene* ActiveScene = RoadMode ? RoadMode->Scene : nullptr;
+	UWorld* World = IsValid(ActiveScene) ? ActiveScene->GetWorld() : nullptr;
+	if (!World)
+	{
+		return;
+	}
+
+	const FScopedTransaction Transaction(FText::FromString(TEXT("Apply Loaded RoadScene Traffic Handedness")));
+	for (TActorIterator<ARoadScene> SceneIt(World); SceneIt; ++SceneIt)
+	{
+		ARoadScene* Scene = *SceneIt;
+		if (IsValid(Scene))
+		{
+			Scene->Modify();
+			Scene->ApplyTrafficHandedness();
+		}
+	}
+}
+
 void USettings_File::Xodr()
 {
 	FEdModeRoad::Get()->Scene->ExportXodr();

@@ -107,7 +107,7 @@ public:
 	void AddNode(const FXmlNode* XmlNode);
 	void AddWay(const FXmlNode* XmlNode);
 	void AddRelation(const FXmlNode* XmlNode);
-	void AnalyzeIntersection(uint64 NodeId, double R, TArray<FOSMWay*>& Inputs, TArray<FOSMWay*>& Outputs);
+	void AnalyzeIntersection(uint64 NodeId, double R, ARoadScene* Scene, TArray<FOSMWay*>& Inputs, TArray<FOSMWay*>& Outputs);
 	void Build();
 	void CreateRoad(uint64 Id);
 	void CreateRoad(ARoadScene* Scene, uint64 Id);

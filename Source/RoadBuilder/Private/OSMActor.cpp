@@ -39,8 +39,16 @@ FOSMWay::FOSMWay(const FXmlNode* Node) :FOSMElement(Node)
 
 void FOSMWay::AttachTo(FOSMWay* MainRoad, int NodeIndex, int RampIndex)
 {
-	TArray<URoadLane*> Lanes = MainRoad->Road->GetLanes(0, { ELaneType::Driving, ELaneType::Shoulder });
-	URoadBoundary* RampBoundary = RampIndex == 0 ? Lanes[RampIndex]->LeftBoundary : Lanes[RampIndex - 1]->RightBoundary;
+	ARoadScene* Scene = MainRoad->Road->GetScene();
+	const int ForwardSide = Scene ? Scene->GetForwardTrafficSide() : RD_RIGHT;
+	TArray<URoadLane*> Lanes = MainRoad->Road->GetLanes(ForwardSide, { ELaneType::Driving, ELaneType::Shoulder });
+	if (RampIndex < 0 || !Lanes.IsValidIndex(RampIndex == 0 ? 0 : RampIndex - 1))
+	{
+		return;
+	}
+	URoadBoundary* RampBoundary = RampIndex == 0
+		? Lanes[0]->GetBoundary(!ForwardSide)
+		: Lanes[RampIndex - 1]->GetBoundary(ForwardSide);
 	FVector2D UV = MainRoad->Road->GetUV(Road->RoadPoints[NodeIndex ? Road->RoadPoints.Num() - 1 : 0].Pos);
 	UV.Y = RampBoundary->GetOffset(UV.X);
 	Road->AddDirPoint(NodeIndex);
@@ -167,7 +175,7 @@ void AOSMActor::AddRelation(const FXmlNode* XmlNode)
 	Relations.Add(Relation.Id, MoveTemp(Relation));
 }
 
-void AOSMActor::AnalyzeIntersection(uint64 NodeId, double R, TArray<FOSMWay*>& Inputs, TArray<FOSMWay*>& Outputs)
+void AOSMActor::AnalyzeIntersection(uint64 NodeId, double R, ARoadScene* Scene, TArray<FOSMWay*>& Inputs, TArray<FOSMWay*>& Outputs)
 {
 	FOSMNode& Node = Nodes[NodeId];
 	TMap<FOSMWay*, double> InputDiffs;
@@ -198,13 +206,14 @@ void AOSMActor::AnalyzeIntersection(uint64 NodeId, double R, TArray<FOSMWay*>& I
 			}
 		}
 	}
+	const bool bLeftHandTraffic = Scene && Scene->IsLeftHandTraffic();
 	Inputs.Sort([&](FOSMWay& A, FOSMWay& B)
 	{
-		return InputDiffs[&A] > InputDiffs[&B];
+		return bLeftHandTraffic ? InputDiffs[&A] < InputDiffs[&B] : InputDiffs[&A] > InputDiffs[&B];
 	});
 	Outputs.Sort([&](FOSMWay& A, FOSMWay& B)
 	{
-		return OutputDiffs[&A] < OutputDiffs[&B];
+		return bLeftHandTraffic ? OutputDiffs[&A] > OutputDiffs[&B] : OutputDiffs[&A] < OutputDiffs[&B];
 	});
 }
 
@@ -249,22 +258,29 @@ void AOSMActor::CreateRoad(ARoadScene* Scene, uint64 Id)
 			if (i > 0)
 			{
 				TArray<FOSMWay*> Inputs, Outputs;
-				AnalyzeIntersection(Way.Nodes[i], Way.GetInputRadian(this, i), Inputs, Outputs);
+				AnalyzeIntersection(Way.Nodes[i], Way.GetInputRadian(this, i), Scene, Inputs, Outputs);
 				MaxRamps = FMath::Max(MaxRamps, Outputs.Num());
 			}
 			if (i < Way.Nodes.Num() - 1)
 			{
 				TArray<FOSMWay*> Inputs, Outputs;
-				AnalyzeIntersection(Way.Nodes[i], Way.GetOutputRadian(this, i), Inputs, Outputs);
+				AnalyzeIntersection(Way.Nodes[i], Way.GetOutputRadian(this, i), Scene, Inputs, Outputs);
 				MaxRamps = FMath::Max(MaxRamps, Inputs.Num());
 			}
 		}
 	}
 	USettings_OSM* Settings = GetMutableDefault<USettings_OSM>();
 	Way.Road = Scene->AddRoad(Settings->RoadStyle.LoadSynchronous(), 0);
-	TArray<URoadLane*> Lanes = Way.Road->GetLanes(0, { ELaneType::Driving });
+	const int ForwardSide = Scene ? Scene->GetForwardTrafficSide() : RD_RIGHT;
+	TArray<URoadLane*> Lanes = Way.Road->GetLanes(ForwardSide, { ELaneType::Driving });
 	for (int i = Lanes.Num(); i < MaxRamps; i++)
-		Way.Road->CopyLane(Lanes[0], 0);
+	{
+		if (Lanes.Num() == 0)
+		{
+			break;
+		}
+		Lanes.Add(Way.Road->CopyLane(Lanes[0], ForwardSide));
+	}
 	FPolyline& Curve = Way.Curve;
 	FPolyline Resample = Curve.Resample(Settings->Resample);
 	double Dist = 0;
@@ -351,7 +367,7 @@ void AOSMActor::ConvertAll()
 				if (Way->Road->ConnectedParents[0] == nullptr)
 				{
 					TArray<FOSMWay*> Inputs, Outputs;
-					AnalyzeIntersection(Way->Nodes[0], Way->GetOutputRadian(this, 0), Inputs, Outputs);
+					AnalyzeIntersection(Way->Nodes[0], Way->GetOutputRadian(this, 0), Scene, Inputs, Outputs);
 					if (Inputs.Num())
 					{
 						FOSMWay* MainRoad = Inputs[0];
@@ -380,7 +396,7 @@ void AOSMActor::ConvertAll()
 				if (Way->Road->ConnectedParents[1] == nullptr)
 				{
 					TArray<FOSMWay*> Inputs, Outputs;
-					AnalyzeIntersection(Way->Nodes.Last(), Way->GetInputRadian(this, Way->Nodes.Num() - 1), Inputs, Outputs);
+					AnalyzeIntersection(Way->Nodes.Last(), Way->GetInputRadian(this, Way->Nodes.Num() - 1), Scene, Inputs, Outputs);
 					if (Outputs.Num())
 					{
 						FOSMWay* MainRoad = Outputs[0];

@@ -162,7 +162,8 @@ URoadStyle* URoadPreset::GenerateRoadStyle()
 	Style->BaseCurveProps = nullptr;
 	Style->bHasGround = bHasGround;
 
-	// Build right lanes (forward direction): center ? edge
+	// Build the physical right-side lanes from center to edge. Traffic direction
+	// is resolved by the owning RoadScene's handedness setting.
 	for (int32 i = 0; i < LanesPerSide; i++)
 	{
 		FRoadLaneStyle& Lane = Style->RightLanes.AddDefaulted_GetRef();
@@ -195,7 +196,7 @@ URoadStyle* URoadPreset::GenerateRoadStyle()
 		Sidewalk.Props = LightProps;
 	}
 
-	// Build left lanes (oncoming direction): center ? edge (mirrored)
+	// Build the physical left-side lanes from center to edge (mirrored).
 	for (int32 i = 0; i < LanesPerSide; i++)
 	{
 		FRoadLaneStyle& Lane = Style->LeftLanes.AddDefaulted_GetRef();

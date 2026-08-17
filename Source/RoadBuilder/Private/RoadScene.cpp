@@ -3,6 +3,7 @@
 
 #include "RoadScene.h"
 #include "RoadBuilder.h"
+#include "Algo/Reverse.h"
 #include "XmlFile.h"
 #include "Engine/Level.h"
 #include "Engine/World.h"
@@ -327,8 +328,19 @@ void AJunctionActor::Update(TOctree2<FRoadOctreeElement, FRoadOctreeSemantics>& 
 
 void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Index)
 {
-	int SrcSide = Gate.Sign > 0 ? 1 : 0;
-	int DstSide = Next.Sign > 0 ? 0 : 1;
+	// Corner borders are geometric and must not flip with traffic handedness.
+	// Driving links, however, must select the inbound and outbound traffic sides.
+	const int GeometrySrcSide = Gate.Sign > 0 ? RD_LEFT : RD_RIGHT;
+	const int GeometryDstSide = Next.Sign > 0 ? RD_RIGHT : RD_LEFT;
+	ARoadScene* Scene = GetScene();
+	const int TrafficSrcSide = Scene
+		? Scene->GetTrafficSideForDirection(-Gate.Sign)
+		: GeometrySrcSide;
+	const int TrafficDstSide = Scene
+		? Scene->GetTrafficSideForDirection(Next.Sign)
+		: GeometryDstSide;
+	int SrcSide = Index == CornerIndex ? GeometrySrcSide : TrafficSrcSide;
+	int DstSide = Index == CornerIndex ? GeometryDstSide : TrafficDstSide;
 	bool SrcRamp = Gate.IsRampOf(Next);
 	bool DstRamp = Next.IsRampOf(Gate);
 	double SrcCorner, DstCorner;
@@ -432,15 +444,16 @@ void AJunctionActor::Build()
 		FJunctionGate& Gate = Gates[i];
 		for (int j = 0; j < Gates.Num(); j++)
 		{
-			int TargetGateIdx = (i + j) % Gates.Num();
-			if (Gate.IsInput() && j != 0 && j != 1 && !IsTurnAllowed(i, TargetGateIdx))
+			const int TargetGateIndex = (i + j) % Gates.Num();
+			if (Gate.IsInput() && j != 0 && j != 1 && !IsTurnAllowed(i, TargetGateIndex))
 			{
-				// Restricted turn: destroy existing link road if any
 				if (j < Gate.Links.Num() && Gate.Links[j].Road)
+				{
 					Gate.Links[j].Destroy();
+				}
 				continue;
 			}
-			FJunctionGate& Next = Gates[TargetGateIdx];
+			FJunctionGate& Next = Gates[TargetGateIndex];
 			BuildLink(Gate, Next, j);
 		}
 	}
@@ -462,14 +475,16 @@ void AJunctionActor::Build()
 			if (Restriction.FromGateIndex >= 0 && Restriction.FromGateIndex < Gates.Num())
 			{
 				FJunctionGate& Gate = Gates[Restriction.FromGateIndex];
-				int SrcSide = Gate.Sign > 0 ? 1 : 0;
+				ARoadScene* Scene = GetScene();
+				int SrcSide = Scene
+					? Scene->GetTrafficSideForDirection(-Gate.Sign)
+					: (Gate.Sign > 0 ? RD_LEFT : RD_RIGHT);
 				URoadBoundary* SrcEdge = Gate.Road->GetRoadEdge(SrcSide);
 				FVector SignPos = SrcEdge->GetPos(Gate.Dist);
 				FVector SignDir = Gate.Road->GetDir(Gate.Dist) * Gate.Sign;
 				FRotator SignRot = SignDir.Rotation();
-				// Offset sign to the side of the road
-				FVector Right(-SignDir.Y, SignDir.X, 0);
-				SignPos += Right * 150.0;
+				const double OutsideSign = SrcSide == RD_LEFT ? 1.0 : -1.0;
+				SignPos += Gate.Road->GetRight(Gate.Dist) * OutsideSign * 150.0;
 				SignPos.Z += 300.0;
 				FTransform SignTransform(SignRot, SignPos);
 				UInstancedStaticMeshComponent* ISMC = nullptr;
@@ -557,8 +572,15 @@ void AJunctionActor::BuildGoreMarkings()
 			FJunctionLink& DstLink = Sign > 0 ? Gates[k].Links[(j - k + Gates.Num()) % Gates.Num()] : Next.Links[(k - j + Gates.Num()) % Gates.Num()];
 			if (!SrcLink.Road || !DstLink.Road)
 				continue;
-			TArray<URoadBoundary*> SrcBoundaries = SrcLink.Road->GetBoundaries(Sign > 0 ? 1 : 0, { ELaneMarkType::Solid });
-			TArray<URoadBoundary*> DstBoundaries = DstLink.Road->GetBoundaries(Sign > 0 ? 0 : 1, { ELaneMarkType::Solid });
+			ARoadScene* Scene = GetScene();
+			const int SrcTrafficSide = Scene
+				? Scene->GetTrafficSideForDirection(-Sign)
+				: (Sign > 0 ? RD_LEFT : RD_RIGHT);
+			const int DstTrafficSide = Scene
+				? Scene->GetTrafficSideForDirection(Sign)
+				: (Sign > 0 ? RD_RIGHT : RD_LEFT);
+			TArray<URoadBoundary*> SrcBoundaries = SrcLink.Road->GetBoundaries(SrcTrafficSide, { ELaneMarkType::Solid });
+			TArray<URoadBoundary*> DstBoundaries = DstLink.Road->GetBoundaries(DstTrafficSide, { ELaneMarkType::Solid });
 			if (CornerBoundaries.Num() && SrcBoundaries.Num() && DstBoundaries.Num())
 			{
 				URoadBoundary* CornerBoundary = CornerBoundaries.Last();
@@ -819,7 +841,9 @@ bool AJunctionActor::IsTurnAllowed(int FromGate, int ToGate) const
 	for (const FTurnRestriction& Restriction : TurnRestrictions)
 	{
 		if (Restriction.FromGateIndex == FromGate && Restriction.ToGateIndex == ToGate)
+		{
 			return false;
+		}
 	}
 	return true;
 }
@@ -828,19 +852,19 @@ void AJunctionActor::AddTurnRestriction(int FromGate, int ToGate)
 {
 	if (IsTurnAllowed(FromGate, ToGate))
 	{
-		FTurnRestriction& R = TurnRestrictions[TurnRestrictions.AddDefaulted()];
-		R.FromGateIndex = FromGate;
-		R.ToGateIndex = ToGate;
+		FTurnRestriction& Restriction = TurnRestrictions[TurnRestrictions.AddDefaulted()];
+		Restriction.FromGateIndex = FromGate;
+		Restriction.ToGateIndex = ToGate;
 	}
 }
 
 void AJunctionActor::RemoveTurnRestriction(int FromGate, int ToGate)
 {
-	for (int i = 0; i < TurnRestrictions.Num(); i++)
+	for (int Index = 0; Index < TurnRestrictions.Num(); ++Index)
 	{
-		if (TurnRestrictions[i].FromGateIndex == FromGate && TurnRestrictions[i].ToGateIndex == ToGate)
+		if (TurnRestrictions[Index].FromGateIndex == FromGate && TurnRestrictions[Index].ToGateIndex == ToGate)
 		{
-			TurnRestrictions.RemoveAt(i);
+			TurnRestrictions.RemoveAt(Index);
 			return;
 		}
 	}
@@ -902,6 +926,7 @@ void AJunctionActor::GenerateTrafficControl()
 		return;
 
 	USettings_Global* Settings = GetMutableDefault<USettings_Global>();
+	ARoadScene* Scene = GetScene();
 
 	for (int i = 0; i < Gates.Num(); i++)
 	{
@@ -909,10 +934,23 @@ void AJunctionActor::GenerateTrafficControl()
 		if (!Gate.IsInput())
 			continue;
 
+		const int ApproachSide = Scene
+			? Scene->GetTrafficSideForDirection(-Gate.Sign)
+			: (Gate.Sign > 0 ? RD_LEFT : RD_RIGHT);
+		TArray<URoadLane*> ApproachLanes = Gate.Road->GetLanes(ApproachSide, { ELaneType::Driving });
 		FVector Pos = FVector(Gate.Road->GetPos(Gate.Dist), Gate.Road->GetHeight(Gate.Dist));
+		if (ApproachLanes.Num() > 0)
+		{
+			Pos = FVector::ZeroVector;
+			for (URoadLane* Lane : ApproachLanes)
+			{
+				Pos += (Lane->LeftBoundary->GetPos(Gate.Dist) + Lane->RightBoundary->GetPos(Gate.Dist)) * 0.5;
+			}
+			Pos /= ApproachLanes.Num();
+		}
 		FVector Dir = Gate.Road->GetDir(Gate.Dist) * Gate.Sign;
 		FRotator Rot = Dir.Rotation();
-		FVector SpawnPos = Pos + Gate.Road->GetRight(Gate.Dist) * 400.0 * Gate.Sign;
+		FVector SpawnPos = Pos;
 
 		if (TrafficControlType == ETrafficControlType::TrafficLight)
 		{
@@ -964,11 +1002,19 @@ void AJunctionActor::GenerateTurnArrows()
 	UWorld* World = GetWorld();
 	if (!World)
 		return;
+	ARoadScene* Scene = GetScene();
 
 	for (int i = 0; i < Gates.Num(); i++)
 	{
 		FJunctionGate& Gate = Gates[i];
 		if (!Gate.IsInput())
+			continue;
+
+		const int ApproachSide = Scene
+			? Scene->GetTrafficSideForDirection(-Gate.Sign)
+			: (Gate.Sign > 0 ? RD_LEFT : RD_RIGHT);
+		TArray<URoadLane*> ApproachLanes = Gate.Road->GetLanes(ApproachSide, { ELaneType::Driving });
+		if (ApproachLanes.Num() == 0)
 			continue;
 
 		// For each input gate, determine which output gates it can reach
@@ -983,7 +1029,7 @@ void AJunctionActor::GenerateTurnArrows()
 			continue;
 
 		// Determine arrow type based on angular relationship
-		FVector InputDir = Gate.Road->GetDir(Gate.Dist) * Gate.Sign;
+		FVector InputDir = Gate.Road->GetDir(Gate.Dist) * (-Gate.Sign);
 		double InputAngle = FMath::Atan2(InputDir.Y, InputDir.X);
 
 		for (int d = 0; d < Destinations.Num(); d++)
@@ -1001,8 +1047,9 @@ void AJunctionActor::GenerateTurnArrows()
 
 			// Place arrow on the road surface approaching the junction
 			double ArrowDist = Gate.Dist + Gate.Sign * 500.0; // 5m before the stop line
-			FVector ArrowPos = FVector(Gate.Road->GetPos(ArrowDist), Gate.Road->GetHeight(ArrowDist));
-			FRotator ArrowRot = (Gate.Road->GetDir(ArrowDist) * Gate.Sign).Rotation();
+			URoadLane* ApproachLane = ApproachLanes[FMath::Min(d, ApproachLanes.Num() - 1)];
+			FVector ArrowPos = (ApproachLane->LeftBoundary->GetPos(ArrowDist) + ApproachLane->RightBoundary->GetPos(ArrowDist)) * 0.5;
+			FRotator ArrowRot = (Gate.Road->GetDir(ArrowDist) * (-Gate.Sign)).Rotation();
 
 			ATurnArrowActor* Arrow = World->SpawnActor<ATurnArrowActor>(ArrowPos, ArrowRot);
 			if (Arrow)
@@ -1023,6 +1070,99 @@ ARoadScene::ARoadScene(const FObjectInitializer& ObjectInitializer) : Super(Obje
 {
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 	Octree = TOctree2<FRoadOctreeElement, FRoadOctreeSemantics>(FVector::ZeroVector, HALF_WORLD_MAX);
+}
+
+ERoadTrafficHandedness ARoadScene::GetResolvedTrafficHandedness() const
+{
+	const USettings_Global* Settings = GetDefault<USettings_Global>();
+	const ERoadTrafficHandedness ProjectHandedness = Settings
+		? Settings->DefaultTrafficHandedness
+		: ERoadTrafficHandedness::RightHandTraffic;
+	return ResolveTrafficHandedness(bOverrideTrafficHandedness, TrafficHandedness, ProjectHandedness);
+}
+
+ERoadTrafficHandedness ARoadScene::ResolveTrafficHandedness(
+	bool bUseSceneOverride,
+	ERoadTrafficHandedness SceneHandedness,
+	ERoadTrafficHandedness ProjectHandedness)
+{
+	return bUseSceneOverride ? SceneHandedness : ProjectHandedness;
+}
+
+int32 ARoadScene::ResolveTrafficSide(ERoadTrafficHandedness Handedness, double DirectionSign)
+{
+	const bool bForward = DirectionSign >= 0.0;
+	if (Handedness == ERoadTrafficHandedness::LeftHandTraffic)
+	{
+		return bForward ? RD_LEFT : RD_RIGHT;
+	}
+	return bForward ? RD_RIGHT : RD_LEFT;
+}
+
+double ARoadScene::ResolveTrafficDirectionSign(ERoadTrafficHandedness Handedness, int32 Side)
+{
+	return Side == ResolveTrafficSide(Handedness, 1.0) ? 1.0 : -1.0;
+}
+
+int32 ARoadScene::GetForwardTrafficSide() const
+{
+	return ResolveTrafficSide(GetResolvedTrafficHandedness(), 1.0);
+}
+
+int32 ARoadScene::GetReverseTrafficSide() const
+{
+	return ResolveTrafficSide(GetResolvedTrafficHandedness(), -1.0);
+}
+
+int32 ARoadScene::GetTrafficSideForDirection(double DirectionSign) const
+{
+	return ResolveTrafficSide(GetResolvedTrafficHandedness(), DirectionSign);
+}
+
+double ARoadScene::GetTrafficDirectionSignForSide(int32 Side) const
+{
+	return ResolveTrafficDirectionSign(GetResolvedTrafficHandedness(), Side);
+}
+
+FString ARoadScene::GetOpenDriveTrafficRule() const
+{
+	return ToOpenDriveTrafficRule(GetResolvedTrafficHandedness());
+}
+
+FString ARoadScene::ToOpenDriveTrafficRule(ERoadTrafficHandedness Handedness)
+{
+	return Handedness == ERoadTrafficHandedness::LeftHandTraffic ? TEXT("LHT") : TEXT("RHT");
+}
+
+bool ARoadScene::IsTrafficHandednessApplied() const
+{
+	return bTrafficHandednessInitialized && LastBuiltTrafficHandedness == GetResolvedTrafficHandedness();
+}
+
+void ARoadScene::ApplyTrafficHandedness()
+{
+	Modify();
+	Rebuild();
+}
+
+void ARoadScene::ResetTrafficDerivedData()
+{
+	CleanupMassGraph();
+	for (AJunctionActor* Junction : Junctions)
+	{
+		if (!IsValid(Junction))
+		{
+			continue;
+		}
+
+		Junction->Modify();
+		Junction->CleanupTrafficControl();
+		Junction->CleanupTurnArrows();
+		for (FJunctionGate& Gate : Junction->Gates)
+		{
+			Gate.Clear();
+		}
+	}
 }
 
 ARoadActor* ARoadScene::AddRoad()
@@ -1244,6 +1384,11 @@ FVector2D ARoadScene::GetRoadUV(ARoadActor* SelectedRoad, const FVector& Pos)
 void ARoadScene::Rebuild()
 {
 	RemoveInvalidReferences();
+	const ERoadTrafficHandedness ResolvedTrafficHandedness = GetResolvedTrafficHandedness();
+	if (!bTrafficHandednessInitialized || LastBuiltTrafficHandedness != ResolvedTrafficHandedness)
+	{
+		ResetTrafficDerivedData();
+	}
 	Octree = TOctree2<FRoadOctreeElement, FRoadOctreeSemantics>(FVector::ZeroVector, HALF_WORLD_MAX);
 	for (ARoadActor* Road : Roads)
 	{
@@ -1494,6 +1639,8 @@ void ARoadScene::Rebuild()
 	{
 		GenerateMassGraph(RoadSlots);
 	}
+	bTrafficHandednessInitialized = true;
+	LastBuiltTrafficHandedness = ResolvedTrafficHandedness;
 }
 
 void ARoadScene::RemoveInvalidReferences()
@@ -1616,101 +1763,101 @@ void ARoadScene::CleanupMassGraph()
 {
 	for (AActor* Actor : MassGraphActors)
 	{
-		if (Actor)
+		if (IsValid(Actor))
+		{
 			Actor->Destroy();
+		}
 	}
 	MassGraphActors.Empty();
 }
 
-static AActor* CreateZoneShapeForLane(UWorld* World, AActor* Parent, ARoadActor* Road, URoadLane* Lane, double StartDist, double EndDist)
+static AActor* CreateZoneShapeForLane(
+	UWorld* World,
+	AActor* Parent,
+	ARoadActor* Road,
+	URoadLane* Lane,
+	double StartDist,
+	double EndDist)
 {
-	if (!Road || !Lane || !Lane->LeftBoundary || !Lane->RightBoundary)
+	if (!World || !Road || !Lane || !Lane->LeftBoundary || !Lane->RightBoundary ||
+		FMath::IsNearlyEqual(StartDist, EndDist))
+	{
 		return nullptr;
-	if (FMath::IsNearlyEqual(StartDist, EndDist))
-		return nullptr;
+	}
 
 	AActor* ShapeActor = World->SpawnActor<AActor>();
 	if (!ShapeActor)
+	{
 		return nullptr;
+	}
 
 	USceneComponent* Root = NewObject<USceneComponent>(ShapeActor, TEXT("Root"));
 	ShapeActor->SetRootComponent(Root);
 	Root->RegisterComponent();
 	ShapeActor->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
 
-	UZoneShapeComponent* ShapeComp = NewObject<UZoneShapeComponent>(ShapeActor, TEXT("ZoneShape"));
-	ShapeComp->SetupAttachment(Root);
-	ShapeComp->RegisterComponent();
+	UZoneShapeComponent* ShapeComponent = NewObject<UZoneShapeComponent>(ShapeActor, TEXT("ZoneShape"));
+	ShapeComponent->SetupAttachment(Root);
+	ShapeComponent->RegisterComponent();
 
-	// Compute lane centerline points
 	FPolyline& LeftCurve = Lane->LeftBoundary->Curve;
-	bool bReverse = StartDist > EndDist;
-	double ActualStart = bReverse ? EndDist : StartDist;
-	double ActualEnd = bReverse ? StartDist : EndDist;
+	const bool bReverse = StartDist > EndDist;
+	const double ActualStart = bReverse ? EndDist : StartDist;
+	const double ActualEnd = bReverse ? StartDist : EndDist;
 
 	TArray<FVector> CenterlinePoints;
-	int StartIdx = LeftCurve.GetPoint(ActualStart);
-	int EndIdx = LeftCurve.GetPoint(ActualEnd);
-	if (StartIdx >= LeftCurve.Points.Num() - 1)
-		StartIdx = LeftCurve.Points.Num() - 2;
-
-	// Add start point
+	int StartIndex = LeftCurve.GetPoint(ActualStart);
+	const int EndIndex = LeftCurve.GetPoint(ActualEnd);
+	if (StartIndex >= LeftCurve.Points.Num() - 1)
 	{
-		FVector LeftPos = Lane->LeftBoundary->GetPos(ActualStart);
-		FVector RightPos = Lane->RightBoundary->GetPos(ActualStart);
-		CenterlinePoints.Add((LeftPos + RightPos) * 0.5);
+		StartIndex = LeftCurve.Points.Num() - 2;
 	}
 
-	// Add intermediate points
-	for (int i = StartIdx + 1; i <= EndIdx && i < LeftCurve.Points.Num(); i++)
+	CenterlinePoints.Add(
+		(Lane->LeftBoundary->GetPos(ActualStart) + Lane->RightBoundary->GetPos(ActualStart)) * 0.5);
+	for (int Index = StartIndex + 1; Index <= EndIndex && Index < LeftCurve.Points.Num(); ++Index)
 	{
-		double Dist = LeftCurve.Points[i].Dist;
-		if (Dist > ActualStart && Dist < ActualEnd)
+		const double Distance = LeftCurve.Points[Index].Dist;
+		if (Distance > ActualStart && Distance < ActualEnd)
 		{
-			FVector LeftPos = Lane->LeftBoundary->GetPos(Dist);
-			FVector RightPos = Lane->RightBoundary->GetPos(Dist);
-			CenterlinePoints.Add((LeftPos + RightPos) * 0.5);
+			CenterlinePoints.Add(
+				(Lane->LeftBoundary->GetPos(Distance) + Lane->RightBoundary->GetPos(Distance)) * 0.5);
 		}
 	}
-
-	// Add end point
-	{
-		FVector LeftPos = Lane->LeftBoundary->GetPos(ActualEnd);
-		FVector RightPos = Lane->RightBoundary->GetPos(ActualEnd);
-		CenterlinePoints.Add((LeftPos + RightPos) * 0.5);
-	}
+	CenterlinePoints.Add(
+		(Lane->LeftBoundary->GetPos(ActualEnd) + Lane->RightBoundary->GetPos(ActualEnd)) * 0.5);
 
 	if (bReverse)
+	{
 		Algo::Reverse(CenterlinePoints);
-
+	}
 	if (CenterlinePoints.Num() < 2)
 	{
 		ShapeActor->Destroy();
 		return nullptr;
 	}
 
-	// Configure the zone shape via ZoneGraph API
-	double LaneWidth = Lane->GetWidth((ActualStart + ActualEnd) * 0.5);
-	ShapeComp->SetShapeType(FZoneShapeType::Spline);
-
-	// Build lane profile and set as common profile
+	const double LaneWidth = Lane->GetWidth((ActualStart + ActualEnd) * 0.5);
+	ShapeComponent->SetShapeType(FZoneShapeType::Spline);
 	FZoneLaneProfile Profile;
 	Profile.Name = TEXT("RoadBuilderLane");
-	FZoneLaneDesc LaneDesc;
-	LaneDesc.Width = LaneWidth;
-	LaneDesc.Direction = EZoneLaneDirection::Forward;
-	Profile.Lanes.Add(LaneDesc);
-	ShapeComp->SetCommonLaneProfile(FZoneLaneProfileRef(Profile));
+	FZoneLaneDesc LaneDescription;
+	LaneDescription.Width = LaneWidth;
+	LaneDescription.Direction = EZoneLaneDirection::Forward;
+	Profile.Lanes.Add(LaneDescription);
+	ShapeComponent->SetCommonLaneProfile(FZoneLaneProfileRef(Profile));
 
-	TArray<FZoneShapePoint>& ShapePoints = ShapeComp->GetMutablePoints();
+	TArray<FZoneShapePoint>& ShapePoints = ShapeComponent->GetMutablePoints();
 	ShapePoints.Reset();
 	ShapePoints.Reserve(CenterlinePoints.Num());
-	for (int i = 0; i < CenterlinePoints.Num(); i++)
+	for (int Index = 0; Index < CenterlinePoints.Num(); ++Index)
 	{
-		FZoneShapePoint Pt(CenterlinePoints[i]);
-		Pt.Type = (i == 0 || i == CenterlinePoints.Num() - 1) ? FZoneShapePointType::Sharp : FZoneShapePointType::AutoBezier;
-		Pt.InnerTurnRadius = 0.0f;
-		ShapePoints.Add(Pt);
+		FZoneShapePoint Point(CenterlinePoints[Index]);
+		Point.Type = (Index == 0 || Index == CenterlinePoints.Num() - 1)
+			? FZoneShapePointType::Sharp
+			: FZoneShapePointType::AutoBezier;
+		Point.InnerTurnRadius = 0.0f;
+		ShapePoints.Add(Point);
 	}
 
 	return ShapeActor;
@@ -1722,97 +1869,122 @@ void ARoadScene::GenerateMassGraph(TMap<ARoadActor*, TArray<FJunctionSlot>>& Roa
 
 	UWorld* World = GetWorld();
 	if (!World)
+	{
 		return;
+	}
 
-	// Generate zone shapes for each road's driving lanes
 	for (ARoadActor* Road : Roads)
 	{
-		if (FMath::IsNearlyZero(Road->Length()))
+		if (!IsValid(Road) || FMath::IsNearlyZero(Road->Length()))
+		{
 			continue;
-
-		TArray<FJunctionSlot>& Slots = RoadSlots[Road];
-
+		}
+		TArray<FJunctionSlot>& Slots = RoadSlots.FindOrAdd(Road);
 		for (URoadLane* Lane : Road->Lanes)
 		{
-			// Only generate for driving lanes
-			bool bHasDriving = false;
-			for (const FLaneSegment& Seg : Lane->Segments)
+			if (!Lane)
 			{
-				if (Seg.LaneType == ELaneType::Driving)
+				continue;
+			}
+			bool bHasDrivingSegment = false;
+			for (const FLaneSegment& Segment : Lane->Segments)
+			{
+				if (Segment.LaneType == ELaneType::Driving)
 				{
-					bHasDriving = true;
+					bHasDrivingSegment = true;
 					break;
 				}
 			}
-			if (!bHasDriving)
+			if (!bHasDrivingSegment)
+			{
 				continue;
-
-			int Side = Lane->GetSide();
-
-			// Generate zone shape for road segments between junctions
-			double PrevDist = 0;
-			for (int s = 0; s < Slots.Num(); s++)
-			{
-				double SlotInput = Slots[s].InputDist();
-				if (SlotInput > PrevDist)
-				{
-					double StartD = PrevDist;
-					double EndD = SlotInput;
-					// Right-side lanes go forward, left-side go backward
-					if (Side == RD_LEFT)
-						Swap(StartD, EndD);
-					if (AActor* Shape = CreateZoneShapeForLane(World, this, Road, Lane, StartD, EndD))
-						MassGraphActors.Add(Shape);
-				}
-				PrevDist = Slots[s].OutputDist();
 			}
-			// Segment after last junction
-			if (PrevDist < Road->Length())
+
+			const int Side = Lane->GetSide();
+			double PreviousDistance = 0.0;
+			for (const FJunctionSlot& Slot : Slots)
 			{
-				double StartD = PrevDist;
-				double EndD = Road->Length();
-				if (Side == RD_LEFT)
-					Swap(StartD, EndD);
-				if (AActor* Shape = CreateZoneShapeForLane(World, this, Road, Lane, StartD, EndD))
+				const double SlotInput = Slot.InputDist();
+				if (SlotInput > PreviousDistance)
+				{
+					double Start = PreviousDistance;
+					double End = SlotInput;
+					if (GetTrafficDirectionSignForSide(Side) < 0.0)
+					{
+						Swap(Start, End);
+					}
+					if (AActor* Shape = CreateZoneShapeForLane(World, this, Road, Lane, Start, End))
+					{
+						MassGraphActors.Add(Shape);
+					}
+				}
+				PreviousDistance = Slot.OutputDist();
+			}
+			if (PreviousDistance < Road->Length())
+			{
+				double Start = PreviousDistance;
+				double End = Road->Length();
+				if (GetTrafficDirectionSignForSide(Side) < 0.0)
+				{
+					Swap(Start, End);
+				}
+				if (AActor* Shape = CreateZoneShapeForLane(World, this, Road, Lane, Start, End))
+				{
 					MassGraphActors.Add(Shape);
+				}
 			}
 		}
 	}
 
-	// Generate zone shapes for junction links (connecting lanes)
 	for (AJunctionActor* Junction : Junctions)
 	{
-		for (int i = 0; i < Junction->Gates.Num(); i++)
+		if (!IsValid(Junction))
 		{
-			FJunctionGate& Gate = Junction->Gates[i];
-			for (int j = 0; j < Gate.Links.Num(); j++)
+			continue;
+		}
+		for (int GateIndex = 0; GateIndex < Junction->Gates.Num(); ++GateIndex)
+		{
+			FJunctionGate& Gate = Junction->Gates[GateIndex];
+			for (int LinkIndex = 0; LinkIndex < Gate.Links.Num(); ++LinkIndex)
 			{
-				if (!Gate.Links[j].Road)
+				ARoadActor* LinkRoad = Gate.Links[LinkIndex].Road;
+				if (!IsValid(LinkRoad))
+				{
 					continue;
-
-				int TargetGateIdx = (i + j) % Junction->Gates.Num();
-
-				// Skip restricted turns
-				if (j != 0 && j != 1 && !Junction->IsTurnAllowed(i, TargetGateIdx))
+				}
+				const int TargetGateIndex = (GateIndex + LinkIndex) % Junction->Gates.Num();
+				if (LinkIndex != 0 && LinkIndex != 1 && !Junction->IsTurnAllowed(GateIndex, TargetGateIndex))
+				{
 					continue;
-
-				ARoadActor* LinkRoad = Gate.Links[j].Road;
+				}
 				for (URoadLane* Lane : LinkRoad->Lanes)
 				{
-					bool bHasDriving = false;
-					for (const FLaneSegment& Seg : Lane->Segments)
+					if (!Lane)
 					{
-						if (Seg.LaneType == ELaneType::Driving)
+						continue;
+					}
+					bool bHasDrivingSegment = false;
+					for (const FLaneSegment& Segment : Lane->Segments)
+					{
+						if (Segment.LaneType == ELaneType::Driving)
 						{
-							bHasDriving = true;
+							bHasDrivingSegment = true;
 							break;
 						}
 					}
-					if (!bHasDriving)
-						continue;
-
-					if (AActor* Shape = CreateZoneShapeForLane(World, this, LinkRoad, Lane, 0, LinkRoad->Length()))
-						MassGraphActors.Add(Shape);
+					if (bHasDrivingSegment)
+					{
+						double Start = 0.0;
+						double End = LinkRoad->Length();
+						if (GetTrafficDirectionSignForSide(Lane->GetSide()) < 0.0)
+						{
+							Swap(Start, End);
+						}
+						if (AActor* Shape = CreateZoneShapeForLane(World, this, LinkRoad, Lane, Start, End))
+						{
+							MassGraphActors.Add(Shape);
+						}
+					}
 				}
 			}
 		}

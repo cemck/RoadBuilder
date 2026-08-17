@@ -681,7 +681,10 @@ void ARoadActor::ConnectTo(int& PointIndex, ARoadActor* Parent)
 	if (!IsUVValid(UV))
 		return;
 	URoadBoundary* Boundary = Parent->GetBoundary(UV);
-	double Sign = Boundary->GetSide() ? -1 : 1;
+	ARoadScene* TrafficScene = Parent->GetScene();
+	double Sign = TrafficScene
+		? TrafficScene->GetTrafficDirectionSignForSide(Boundary->GetSide())
+		: (Boundary->GetSide() == RD_LEFT ? -1.0 : 1.0);
 	FVector ParentDir = Parent->GetDir(UV.X) * Sign;
 	FVector Dir = GetDir(PointIndex > 0 ? Length() : 0);
 	if ((ParentDir | Dir) < 0.7071)
@@ -1440,6 +1443,28 @@ void ARoadActor::UpdateCurve(TSet<ARoadActor*>& UpdatedRoads)
 				double PrevRadian = FMath::Atan2(PrevDir.Y, PrevDir.X);
 				double NextRadian = FMath::Atan2(NextDir.Y, NextDir.X);
 				double Diff = WrapRadian(NextRadian - PrevRadian);
+				// Collinear authoring points are common on long expressway
+				// straights.  Treat them as an ordinary straight segment instead
+				// of entering the curvature solver, where Size / Tan(Diff / 2)
+				// becomes infinite for Diff == 0 and can later produce non-finite
+				// procedural-mesh bounds.
+				if (FMath::IsNearlyZero(Diff, DOUBLE_KINDA_SMALL_NUMBER))
+				{
+					double CutSize = PrevSize - LastSize;
+					if (CutSize > DOUBLE_KINDA_SMALL_NUMBER)
+					{
+						S += AddRoadSegment(
+							S,
+							CutSize,
+							RoadPoints[i - 1].Pos + PrevDir * LastSize,
+							PrevRadian,
+							0,
+							0).Length;
+					}
+					RoadPoints[i].Dist = S;
+					LastSize = 0;
+					continue;
+				}
 				double Cos = FMath::Cos(Diff / 2);
 				NextRadian = PrevRadian + Diff;
 				double Size = FMath::Min((i - 1 > 0) ? PrevSize / 2 : PrevSize, (i + 1 < RoadPoints.Num() - 1) ? NextSize / 2 : NextSize);
@@ -1768,6 +1793,7 @@ void ARoadActor::ExportXodr(FXmlNode* XmlNode, int& RoadId, int& ObjectId, int J
 		XmlNode_AddAttribute(RoadNode, TEXT("id"), RoadId++);
 		XmlNode_AddAttribute(RoadNode, TEXT("junction"), JunctionId);
 		XmlNode_AddAttribute(RoadNode, TEXT("length"), (R_End - R_Start) * 0.01);
+		XmlNode_AddAttribute(RoadNode, TEXT("rule"), Scene->GetOpenDriveTrafficRule());
 		FXmlNode* PlanViewNode = XmlNode_CreateChild(RoadNode, TEXT("planView"));
 		TArray<FRoadSegment> CutRoads = CutRoadSegments(R_Start, R_End);
 		for (int j = 0; j < CutRoads.Num(); j++)
