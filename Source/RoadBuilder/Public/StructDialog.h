@@ -3,9 +3,12 @@
 
 #pragma once
 #if WITH_EDITOR
-#include "Widgets/SCompoundWidget.h"
-#include "IStructureDetailsView.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWindow.h"
+#include "IStructureDetailsView.h"
+#include "Interfaces/IMainFrameModule.h"
+#include "Modules/ModuleManager.h"
 
 class ROADBUILDER_API SObjectDialog : public SCompoundWidget
 {

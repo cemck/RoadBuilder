@@ -23,10 +23,10 @@ struct FRoadLaneStyle
 {
 	GENERATED_USTRUCT_BODY()
 	UPROPERTY(EditAnywhere, Category = Style)
-	double Width;
+	double Width = 0;
 	
 	UPROPERTY(EditAnywhere, Category = Style)
-	ELaneType LaneType;
+	ELaneType LaneType = ELaneType::None;
 
 	UPROPERTY(EditAnywhere, Category = Style)
 	ULaneShape* LaneShape = nullptr;
@@ -38,7 +38,7 @@ struct FRoadLaneStyle
 	URoadProps* Props = nullptr;
 };
 
-UCLASS()
+UCLASS(BlueprintType)
 class ROADBUILDER_API URoadStyle : public UObject
 {
 	GENERATED_BODY()
@@ -63,7 +63,7 @@ public:
 	TArray<FRoadLaneStyle> RightLanes;
 
 	UPROPERTY(EditAnywhere, Category = Style)
-	ULaneMarkStyle* BaseCurveMark;
+	ULaneMarkStyle* BaseCurveMark = nullptr;
 
 	UPROPERTY(EditAnywhere, Category = Style)
 	URoadProps* BaseCurveProps = nullptr;
@@ -78,7 +78,7 @@ struct FRoadPoint
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(EditAnywhere, Category = Point)
-	FVector2D Pos;
+	FVector2D Pos = FVector2D::ZeroVector;
 
 	UPROPERTY()
 	double Dist = 0;
@@ -109,22 +109,22 @@ struct FRoadSegment
 	FRoadSegment ApplyOffset(double Offset);
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	double Dist;
+	double Dist = 0;
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	double Length;
+	double Length = 0;
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	FVector2D StartPos;
+	FVector2D StartPos = FVector2D::ZeroVector;
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	double StartRadian;
+	double StartRadian = 0;
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	double StartCurv;
+	double StartCurv = 0;
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	double EndCurv;
+	double EndCurv = 0;
 };
 
 USTRUCT()
@@ -157,13 +157,13 @@ struct FHeightSegment
 	FHeightSegment Reverse();
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	double Dist;
+	double Dist = 0;
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	double Height;
+	double Height = 0;
 
 	UPROPERTY(EditAnywhere, Category = Segment)
-	double Dir;
+	double Dir = 0;
 };
 
 USTRUCT()
@@ -175,20 +175,44 @@ struct FConnectInfo
 	double ConnectionSign(ARoadActor* Parent);
 
 	UPROPERTY()
-	ARoadActor* Child;
+	ARoadActor* Child = nullptr;
 
 	UPROPERTY()
-	int Index;
+	int Index = INDEX_NONE;
 
 	UPROPERTY()
-	FVector2D UV;
+	FVector2D UV = FVector2D::ZeroVector;
 };
 
-UCLASS()
+UCLASS(BlueprintType, Blueprintable)
 class ROADBUILDER_API ARoadActor : public AActor
 {
 	GENERATED_UCLASS_BODY()
 public:
+	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
+	bool RuntimeSetRoadPoints(const TArray<FVector>& WorldPoints, bool bRebuildScene = true);
+
+	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
+	bool RuntimeAddRoadPoint(const FVector& WorldPoint, int32 InsertIndex = -1, bool bRebuildScene = true);
+
+	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
+	bool RuntimeSetRoadPoint(int32 PointIndex, const FVector& WorldPoint, bool bRebuildScene = true);
+
+	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
+	bool RuntimeRemoveRoadPoint(int32 PointIndex, bool bRebuildScene = true);
+
+	UFUNCTION(BlueprintCallable, Category = "RoadBuilder|Runtime")
+	void RuntimeRefresh(bool bRebuildScene = true);
+
+	UFUNCTION(BlueprintPure, Category = "RoadBuilder|Runtime")
+	int32 RuntimeGetRoadPointCount() const { return RoadPoints.Num(); }
+
+	UFUNCTION(BlueprintPure, Category = "RoadBuilder|Runtime")
+	FVector RuntimeGetRoadPoint(int32 PointIndex) const;
+
+	UFUNCTION(BlueprintPure, Category = "RoadBuilder|Runtime")
+	double RuntimeGetRoadLength() const;
+
 	URoadBoundary* AddBoundary(double Offset, ULaneMarkStyle* LaneMarking, URoadProps* Props);
 	URoadBoundary* GetRoadEdge(int Side);
 	URoadBoundary* GetRoadBorder(int Side);

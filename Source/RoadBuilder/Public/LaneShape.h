@@ -25,7 +25,7 @@ struct FLaneCrossSection
 	UMaterialInterface* Material = nullptr;
 
 	UPROPERTY(EditAnywhere, Category = CrossSection)
-	ELaneAlignment Alignment;
+	ELaneAlignment Alignment = ELaneAlignment::Up;
 
 	UPROPERTY(EditAnywhere, Category = CrossSection)
 	FVector2D UVScale = FVector2D::UnitVector;
@@ -34,7 +34,7 @@ struct FLaneCrossSection
 	TArray<FVector2D> Points;
 
 	UPROPERTY(EditAnywhere, Category = CrossSection)
-	uint32 ClampZ : 1;
+	uint32 ClampZ : 1 = 0;
 };
 
 UCLASS()

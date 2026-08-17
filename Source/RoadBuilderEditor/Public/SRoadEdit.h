@@ -2,6 +2,7 @@
 // Copyright 2024. All Rights Reserved.
 
 #pragma once
+#include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/SCompoundWidget.h"
 #include "IDetailsView.h"
 #include "IStructureDetailsView.h"

@@ -99,6 +99,8 @@ class ROADBUILDER_API USettings_RoadPlan : public USettings_Base
 {
 	GENERATED_BODY()
 public:
+	USettings_RoadPlan(const FObjectInitializer& ObjectInitializer);
+
 #if WITH_EDITOR
 	UFUNCTION(CallInEditor, Category = Styles)
 	void Apply();

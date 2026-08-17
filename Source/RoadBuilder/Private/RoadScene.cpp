@@ -10,6 +10,10 @@
 #include "ZoneGraphTypes.h"
 #include "ZoneGraphSettings.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#if WITH_EDITOR
+#include "Editor.h"
+#include "Framework/Application/SlateApplication.h"
+#endif
 
 void FJunctionLink::CreateRoad(AJunctionActor* Parent)
 {
@@ -1029,6 +1033,59 @@ ARoadActor* ARoadScene::AddRoad()
 	return Road;
 }
 
+ARoadActor* ARoadScene::RuntimeCreateRoad(const TArray<FVector>& WorldPoints, URoadStyle* Style, bool bRebuildScene)
+{
+	if (WorldPoints.Num() < 2)
+	{
+		return nullptr;
+	}
+
+	ARoadActor* Road = AddRoad(Style, WorldPoints[0].Z);
+	if (!Road || !Road->RuntimeSetRoadPoints(WorldPoints, false))
+	{
+		if (Road)
+		{
+			DestroyRoad(Road);
+		}
+		return nullptr;
+	}
+
+	if (bRebuildScene)
+	{
+		Rebuild();
+	}
+
+	return Road;
+}
+
+bool ARoadScene::RuntimeDestroyRoad(ARoadActor* Road, bool bRebuildScene)
+{
+	if (!IsValid(Road) || !Roads.Contains(Road))
+	{
+		return false;
+	}
+
+	DestroyRoad(Road);
+	if (bRebuildScene)
+	{
+		Rebuild();
+	}
+	return true;
+}
+
+void ARoadScene::RuntimeRebuild()
+{
+	RemoveInvalidReferences();
+	for (ARoadActor* Road : Roads)
+	{
+		if (IsValid(Road))
+		{
+			Road->RuntimeRefresh(false);
+		}
+	}
+	Rebuild();
+}
+
 ARoadActor* ARoadScene::AddRoad(URoadStyle* Style, double Height)
 {
 	ARoadActor* Road = AddRoad();
@@ -1052,13 +1109,14 @@ ARoadActor* ARoadScene::DuplicateRoad(ARoadActor* Source)
 
 ARoadActor* ARoadScene::PickRoad(const FVector& Pos, ARoadActor* IgnoredRoad)
 {
+	RemoveInvalidReferences();
 	double BaseOffset = 0;
 	FVector2D BestUV(0, MAX_dbl);
 	ARoadActor* Result = nullptr;
 	Octree.FindElementsWithBoundsTest(FBoxCenterAndExtent(Pos, FVector(DefaultJunctionExtent, DefaultJunctionExtent, DefaultJunctionExtent)), [&](const FRoadOctreeElement& Element)
 	{
-		ARoadActor* Road = Element.Boundary->GetRoad();
-		if (Road != IgnoredRoad)
+		ARoadActor* Road = Element.Boundary ? Element.Boundary->GetRoad() : nullptr;
+		if (IsValid(Road) && Road != IgnoredRoad)
 		{
 			FVector2D UV = Element.Boundary->Curve.GetUV((const FVector2D&)Pos, Element.Index);
 			if (UV.X >= 0 && UV.X <= Road->Length() && FMath::Abs(BestUV.Y) > FMath::Abs(UV.Y))
@@ -1139,17 +1197,33 @@ TArray<URoadMarking*> ARoadScene::GetMarkings(ARoadActor* Road)
 #endif
 TMap<ARoadActor*, TArray<FJunctionSlot>> ARoadScene::GetAllJunctionSlots()
 {
+	RemoveInvalidReferences();
 	TMap<ARoadActor*, TArray<FJunctionSlot>> RoadSlots;
 	for (ARoadActor* Road : Roads)
-		RoadSlots.Add(Road, GetJunctionSlots(Road));
+	{
+		if (IsValid(Road))
+		{
+			RoadSlots.Add(Road, GetJunctionSlots(Road));
+		}
+	}
 	return MoveTemp(RoadSlots);
 }
 
 TArray<FJunctionSlot> ARoadScene::GetJunctionSlots(ARoadActor* Road)
 {
 	TArray<FJunctionSlot> Results;
+	if (!IsValid(Road))
+	{
+		return MoveTemp(Results);
+	}
+
 	for (AJunctionActor* Junction : Junctions)
-		Results.Append(Junction->GetSlots(Road));
+	{
+		if (IsValid(Junction))
+		{
+			Results.Append(Junction->GetSlots(Road));
+		}
+	}
 	Results.Sort();
 	return MoveTemp(Results);
 }
@@ -1169,14 +1243,29 @@ FVector2D ARoadScene::GetRoadUV(ARoadActor* SelectedRoad, const FVector& Pos)
 */
 void ARoadScene::Rebuild()
 {
+	RemoveInvalidReferences();
+	Octree = TOctree2<FRoadOctreeElement, FRoadOctreeSemantics>(FVector::ZeroVector, HALF_WORLD_MAX);
+	for (ARoadActor* Road : Roads)
+	{
+		OctreeAddRoad(Road);
+	}
+
 	for (AJunctionActor* Junction : Junctions)
 	{
+		if (!IsValid(Junction))
+		{
+			continue;
+		}
 		Junction->Modify();
 		for (FJunctionGate& Gate : Junction->Gates)
 			Gate.MarkExpired();
 	}
 	for (ARoadActor* Road : Roads)
 	{
+		if (!IsValid(Road) || !Road->BaseCurve)
+		{
+			continue;
+		}
 		if (GetMutableDefault<USettings_Global>()->BuildJunctions)
 		{
 			for (int i = 0; i < Road->BaseCurve->Curve.Points.Num() - 1; i++)
@@ -1189,6 +1278,10 @@ void ARoadScene::Rebuild()
 				double EndDist = C.Points[i + 1].Dist;
 				Octree.FindElementsWithBoundsTest(Segment.GetBounds(), [&](const FRoadOctreeElement& Element)
 				{
+					if (!Element.Boundary || !IsValid(Element.Boundary->GetRoad()))
+					{
+						return;
+					}
 					if (Element.IsBoundary() || Element.Adjacent(Road->BaseCurve, i))
 						return;
 					double Seg1, Seg2;
@@ -1214,9 +1307,19 @@ void ARoadScene::Rebuild()
 	for (int i = 0; i < Junctions.Num();)
 	{
 		AJunctionActor* Junction = Junctions[i];
+		if (!IsValid(Junction))
+		{
+			Junctions.RemoveAt(i);
+			continue;
+		}
 		TSet<ARoadActor*> Starts, Ends;
 		for (FJunctionGate& Gate : Junction->Gates)
 		{
+			if (!IsValid(Gate.Road))
+			{
+				Gate.MarkExpired();
+				continue;
+			}
 			if (FMath::IsNearlyZero(Gate.Dist))
 				Starts.Add(Gate.Road);
 			if (FMath::IsNearlyEqual(Gate.Dist, Gate.Road->Length()))
@@ -1257,6 +1360,10 @@ void ARoadScene::Rebuild()
 	}
 	ForEachAttachedActors([&](AActor* Actor)->bool
 	{
+		if (!IsValid(Actor))
+		{
+			return true;
+		}
 		if (Actor->IsA<AJunctionActor>())
 		{
 			if (!Junctions.Contains(Actor))
@@ -1296,9 +1403,15 @@ void ARoadScene::Rebuild()
 	};
 	while (true)
 	{
+		RemoveInvalidReferences();
 		RoadSlots = GetAllJunctionSlots();
 		for (AJunctionActor* Junction : Junctions)
-			Junction->Update(Octree);
+		{
+			if (IsValid(Junction))
+			{
+				Junction->Update(Octree);
+			}
+		}
 		bool ReSolve = false;
 		for (auto& Pair : RoadSlots)
 		{
@@ -1329,7 +1442,11 @@ void ARoadScene::Rebuild()
 	for (int i = 0; i < Junctions.Num();)
 	{
 		AJunctionActor* Junction = Junctions[i];
-		if (Junction->Gates.Num() < 3)
+		if (!IsValid(Junction))
+		{
+			Junctions.RemoveAt(i);
+		}
+		else if (Junction->Gates.Num() < 3)
 		{
 			ReplaceJunctionWith(Junction);
 			Junctions[i]->Destroy();
@@ -1338,26 +1455,61 @@ void ARoadScene::Rebuild()
 		else
 			i++;
 	}
+	RemoveInvalidReferences();
 	for (AJunctionActor* Junction : Junctions)
-		Junction->Build();
+	{
+		if (IsValid(Junction))
+		{
+			Junction->Build();
+		}
+	}
 	USettings_Global* GlobalSettings = GetMutableDefault<USettings_Global>();
 	for (AJunctionActor* Junction : Junctions)
 	{
-		Junction->GenerateTrafficControl();
-		if (GlobalSettings->AutoGenerateTurnArrows)
-			Junction->GenerateTurnArrows();
+		if (IsValid(Junction))
+		{
+			Junction->GenerateTrafficControl();
+			if (GlobalSettings->AutoGenerateTurnArrows)
+			{
+				Junction->GenerateTurnArrows();
+			}
+		}
 	}
 	for (ARoadActor* Road : Roads)
-		Road->BuildMesh(RoadSlots[Road]);
+	{
+		if (IsValid(Road))
+		{
+			Road->BuildMesh(RoadSlots[Road]);
+		}
+	}
 	GenerateGrounds(RoadSlots);
 	for (AGroundActor* Ground : Grounds)
 	{
-		Ground->BuildMesh(RoadSlots);
+		if (IsValid(Ground))
+		{
+			Ground->BuildMesh(RoadSlots);
+		}
 	}
 	if (GetMutableDefault<USettings_Global>()->BuildMassGraph)
 	{
 		GenerateMassGraph(RoadSlots);
 	}
+}
+
+void ARoadScene::RemoveInvalidReferences()
+{
+	Roads.RemoveAllSwap([](ARoadActor* Road)
+	{
+		return !IsValid(Road);
+	});
+	Junctions.RemoveAllSwap([](AJunctionActor* Junction)
+	{
+		return !IsValid(Junction);
+	});
+	Grounds.RemoveAllSwap([](AGroundActor* Ground)
+	{
+		return !IsValid(Ground);
+	});
 }
 
 void ARoadScene::GenerateGrounds(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots)
@@ -1671,12 +1823,22 @@ void ARoadScene::GenerateMassGraph(TMap<ARoadActor*, TArray<FJunctionSlot>>& Roa
 
 void ARoadScene::OctreeAddBoundary(URoadBoundary* Boundary)
 {
+	if (!Boundary)
+	{
+		return;
+	}
+
 	for (int i = 0; i < Boundary->Curve.Points.Num() - 1; i++)
 		Octree.AddElement(FRoadOctreeElement(Boundary, i));
 }
 
 void ARoadScene::OctreeRemoveBoundary(URoadBoundary* Boundary)
 {
+	if (!Boundary)
+	{
+		return;
+	}
+
 	for (int i = 0; i < Boundary->OctreeIds.Num(); i++)
 	{
 		Octree.RemoveElement(Boundary->OctreeIds[i]);
@@ -1686,6 +1848,10 @@ void ARoadScene::OctreeRemoveBoundary(URoadBoundary* Boundary)
 
 void ARoadScene::OctreeAddRoad(ARoadActor* Road)
 {
+	if (!IsValid(Road) || !Road->BaseCurve)
+	{
+		return;
+	}
 	TSet<URoadBoundary*> Boundaries = { Road->BaseCurve, Road->GetRoadEdge(0), Road->GetRoadEdge(1) };
 	for (URoadBoundary* Boundary : Boundaries)
 		OctreeAddBoundary(Boundary);
@@ -1693,6 +1859,10 @@ void ARoadScene::OctreeAddRoad(ARoadActor* Road)
 
 void ARoadScene::OctreeRemoveRoad(ARoadActor* Road)
 {
+	if (!IsValid(Road) || !Road->BaseCurve)
+	{
+		return;
+	}
 	TSet<URoadBoundary*> Boundaries = { Road->BaseCurve, Road->GetRoadEdge(0), Road->GetRoadEdge(1) };
 	for (URoadBoundary* Boundary : Boundaries)
 		OctreeRemoveBoundary(Boundary);
@@ -1700,16 +1870,23 @@ void ARoadScene::OctreeRemoveRoad(ARoadActor* Road)
 
 void ARoadScene::DestroyRoad(ARoadActor* Road)
 {
+	if (!IsValid(Road))
+	{
+		RemoveInvalidReferences();
+		return;
+	}
+	Roads.Remove(Road);
 	OctreeRemoveRoad(Road);
 	Road->DeleteAllMarkings();
 	Road->DisconnectAll();
 	Road->Destroy();
-	Roads.Remove(Road);
+	RemoveInvalidReferences();
 }
 
 void ARoadScene::PostLoad()
 {
 	AActor::PostLoad();
+	RemoveInvalidReferences();
 	for (ARoadActor* Road : Roads)
 		OctreeAddRoad(Road);
 }

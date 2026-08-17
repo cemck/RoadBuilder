@@ -2,8 +2,10 @@
 // Copyright 2024. All Rights Reserved.
 
 #include "RoadEdMode.h"
+#include "EditorViewportClient.h"
 #include "EditorModes.h"
 #include "EngineUtils.h"
+#include "SceneView.h"
 #include "Kismet/GameplayStatics.h"
 #include "Editor/TransBuffer.h"
 #include "DynamicMeshBuilder.h"
@@ -37,7 +39,10 @@ bool FRoadTool::EndModify()
 {
 	if (LazyRebuild)
 	{
-		GetScene()->Rebuild();
+		if (ARoadScene* RoadScene = GetScene())
+		{
+			RoadScene->Rebuild();
+		}
 		LazyRebuild = false;
 	}
 	return true;
@@ -47,42 +52,91 @@ void FRoadTool::Reset()
 {
 	FEditorViewportClient* Client = GLevelEditorModeTools().GetFocusedViewportClient();
 	if (Client)
+	{
 		Client->Invalidate();
-	if (SRoadEdit* Widget = GetEditWidget())
-		Widget->SetEditNone();
+	}
+
+	if (SRoadEdit* EditWidget = GetEditWidget())
+	{
+		EditWidget->SetEditNone();
+	}
 }
 
 ARoadScene* FRoadTool::GetScene() const
 {
-	return FEdModeRoad::Get()->Scene;
+	if (FEdModeRoad* RoadMode = FEdModeRoad::Get())
+	{
+		return RoadMode->Scene;
+	}
+	return nullptr;
 }
 
 ARoadActor*& FRoadTool::GetSelectedRoad() const
 {
-	return FEdModeRoad::Get()->SelectedRoad;
+	static ARoadActor* NullSelectedRoad = nullptr;
+	if (FEdModeRoad* RoadMode = FEdModeRoad::Get())
+	{
+		return RoadMode->SelectedRoad;
+	}
+	NullSelectedRoad = nullptr;
+	return NullSelectedRoad;
 }
 
 AGroundActor*& FRoadTool::GetSelectedGround() const
 {
-	return FEdModeRoad::Get()->SelectedGround;
+	static AGroundActor* NullSelectedGround = nullptr;
+	if (FEdModeRoad* RoadMode = FEdModeRoad::Get())
+	{
+		return RoadMode->SelectedGround;
+	}
+	NullSelectedGround = nullptr;
+	return NullSelectedGround;
 }
 
 AJunctionActor*& FRoadTool::GetSelectedJunction() const
 {
-	return FEdModeRoad::Get()->SelectedJunction;
+	static AJunctionActor* NullSelectedJunction = nullptr;
+	if (FEdModeRoad* RoadMode = FEdModeRoad::Get())
+	{
+		return RoadMode->SelectedJunction;
+	}
+	NullSelectedJunction = nullptr;
+	return NullSelectedJunction;
 }
 
 SRoadEdit* FRoadTool::GetEditWidget() const
 {
-	TSharedPtr<SWidget> Widget = GLevelEditorModeTools().GetActiveMode(FEdModeRoad::GetModeID())->GetToolkit()->GetInlineContent();
+	FEdModeRoad* RoadMode = FEdModeRoad::Get();
+	if (!RoadMode)
+	{
+		return nullptr;
+	}
+
+	TSharedPtr<FModeToolkit> ModeToolkit = RoadMode->GetToolkit();
+	if (!ModeToolkit.IsValid())
+	{
+		return nullptr;
+	}
+
+	TSharedPtr<SWidget> Widget = ModeToolkit->GetInlineContent();
 	return (SRoadEdit*)Widget.Get();
 }
 
 FRay FRoadTool::GetRay(FEditorViewportClient* ViewportClient) const
 {
+	if (!ViewportClient || !ViewportClient->Viewport || !ViewportClient->GetScene())
+	{
+		return FRay();
+	}
+
 	FViewport* Viewport = ViewportClient->Viewport;
 	FSceneViewFamilyContext ViewFamily(FSceneViewFamily::ConstructionValues(Viewport, ViewportClient->GetScene(), ViewportClient->EngineShowFlags).SetRealtimeUpdate(ViewportClient->IsRealtime()));
 	FSceneView* View = ViewportClient->CalcSceneView(&ViewFamily);
+	if (!View)
+	{
+		return FRay();
+	}
+
 	FViewportCursorLocation MouseViewportRay(View, ViewportClient, Viewport->GetMouseX(), Viewport->GetMouseY());
 	return FRay(MouseViewportRay.GetOrigin(), MouseViewportRay.GetDirection());
 }
@@ -93,7 +147,9 @@ FVector FRoadTool::LineTrace(const FRay& Ray, AActor* IgnoredActor) const
 	FCollisionQueryParams Params;
 	if (IgnoredActor)
 		Params.AddIgnoredActor(IgnoredActor);
-	if (GetScene()->GetWorld()->LineTraceSingleByChannel(Hit, Ray.Origin, Ray.Origin + Ray.Direction * 1000000.f, ECollisionChannel::ECC_Visibility, Params))
+	ARoadScene* RoadScene = GetScene();
+	UWorld* World = RoadScene ? RoadScene->GetWorld() : nullptr;
+	if (World && World->LineTraceSingleByChannel(Hit, Ray.Origin, Ray.Origin + Ray.Direction * 1000000.f, ECollisionChannel::ECC_Visibility, Params))
 		return Hit.Location;
 	return FVector(WORLD_MAX, WORLD_MAX, WORLD_MAX);
 }
@@ -176,12 +232,22 @@ void FRoadTool::DrawCurve(FPrimitiveDrawInterface* PDI, const FPolyline& Curve, 
 
 void FRoadTool::DrawPoint(FPrimitiveDrawInterface* PDI, URoadCurve* Curve, double Dist, FColor Color)
 {
+	if (!PDI || !Curve)
+	{
+		return;
+	}
+
 	FVector Point = Curve->GetPos(Dist);
 	PDI->DrawPoint(Point, Color, Size_Point, SDPG_Foreground);
 }
 
 void FRoadTool::DrawDivider(FPrimitiveDrawInterface* PDI, URoadLane* Lane, double Dist, FColor Color)
 {
+	if (!PDI || !Lane || !Lane->RightBoundary || !Lane->LeftBoundary)
+	{
+		return;
+	}
+
 	FVector Start = Lane->RightBoundary->GetPos(Dist);
 	FVector End = Lane->LeftBoundary->GetPos(Dist);
 	PDI->DrawLine(Start, End, Color, SDPG_Foreground);
@@ -189,27 +255,53 @@ void FRoadTool::DrawDivider(FPrimitiveDrawInterface* PDI, URoadLane* Lane, doubl
 
 void FRoadTool::DrawRoads(FPrimitiveDrawInterface* PDI, bool DrawLinks)
 {
+	if (!PDI)
+	{
+		return;
+	}
+
 	ARoadActor* SelectedRoad = GetSelectedRoad();
 	ARoadScene* Scene = GetScene();
+	if (!IsValid(Scene))
+	{
+		return;
+	}
+
+	Scene->RemoveInvalidReferences();
 	for (ARoadActor* Road : Scene->Roads)
 	{
+		if (!IsValid(Road))
+		{
+			continue;
+		}
+
 		PDI->SetHitProxy(new HRoadProxy(Road));
 		FColor Color = Road == SelectedRoad ? Color_Select : Color_Road;
 		if (Road->RoadPoints.Num() == 1)
 			PDI->DrawPoint(Road->GetPos(0), Color, Size_Point, SDPG_Foreground);
-		else
+		else if (Road->BaseCurve)
 			DrawCurve(PDI, Road->BaseCurve->Curve, Color, Thickness_Road, Road == SelectedRoad ? DepthBias_Select : 0);
 	}
 	if (DrawLinks)
 	{
 		for (AJunctionActor* Junction : Scene->Junctions)
 		{
+			if (!IsValid(Junction))
+			{
+				continue;
+			}
+
 			for (FJunctionGate& Gate : Junction->Gates)
 			{
 				for (int i = 0; i < Gate.Links.Num(); i++)
 				{
 					if (ARoadActor* Road = Gate.Links[i].Road)
 					{
+						if (!IsValid(Road) || !Road->BaseCurve)
+						{
+							continue;
+						}
+
 						if (URoadCurve* Curve = (i == 1) ? (URoadCurve*)Road->BaseCurve : (URoadCurve*)Road->BaseCurve->RightLane)
 						{
 							PDI->SetHitProxy(new HRoadProxy(Road));
@@ -224,19 +316,39 @@ void FRoadTool::DrawRoads(FPrimitiveDrawInterface* PDI, bool DrawLinks)
 
 void FRoadTool::DrawJunction(FPrimitiveDrawInterface* PDI, AJunctionActor* Junction, FColor Color)
 {
+	if (!PDI || !IsValid(Junction))
+	{
+		return;
+	}
+
 	TArray<FJunctionGate>& Gates = Junction->Gates;
+	if (Gates.Num() < 2)
+	{
+		return;
+	}
+
 	PDI->SetHitProxy(new HJunctionProxy(Junction));
 	for (int i = 0; i < Gates.Num(); i++)
 	{
 		FJunctionGate& Gate = Gates[i];
 		FJunctionGate& Next = Gates[(i + 1) % Gates.Num()];
+		if (!IsValid(Gate.Road) || !IsValid(Next.Road))
+		{
+			continue;
+		}
+
 		int SrcSide = Gate.Sign > 0 ? 0 : 1;
 		int DstSide = Next.Sign > 0 ? 1 : 0;
 		URoadBoundary* SrcBoundary = Gate.Road->GetRoadEdge(SrcSide);
 		URoadBoundary* PrevBoundary = Gate.Road->GetRoadEdge(!SrcSide);
 		URoadBoundary* DstBoundary = Next.Road->GetRoadEdge(DstSide);
+		if (!SrcBoundary || !PrevBoundary || !DstBoundary)
+		{
+			continue;
+		}
+
 		PDI->DrawLine(PrevBoundary->GetPos(Gate.Dist), SrcBoundary->GetPos(Gate.Dist), Color, SDPG_Foreground, Thickness_Road, 0, true);
-		if (Gate.Links[1].Road)
+		if (Gate.Links.IsValidIndex(1) && IsValid(Gate.Links[1].Road) && Gate.Links[1].Road->BaseCurve)
 			DrawCurve(PDI, Gate.Links[1].Road->BaseCurve->Curve, Color, Thickness_Road);
 	}
 	USettings_Global* Settings = GetMutableDefault<USettings_Global>();
@@ -288,9 +400,20 @@ void FRoadTool::DrawJunction(FPrimitiveDrawInterface* PDI, AJunctionActor* Junct
 void FRoadTool::DrawJunctions(FPrimitiveDrawInterface* PDI)
 {
 	ARoadScene* Scene = GetScene();
+	if (!IsValid(Scene))
+	{
+		return;
+	}
+
+	Scene->RemoveInvalidReferences();
 	AJunctionActor* SelectedJunction = GetSelectedJunction();
 	for (AJunctionActor* Junction : Scene->Junctions)
-		DrawJunction(PDI, Junction, (Junction == SelectedJunction) ? Color_Select : Color_Road);
+	{
+		if (IsValid(Junction))
+		{
+			DrawJunction(PDI, Junction, (Junction == SelectedJunction) ? Color_Select : Color_Road);
+		}
+	}
 }
 
 FVector FRoadTool_RoadPlan::GetWidgetLocation() const
@@ -413,7 +536,7 @@ bool FRoadTool_RoadPlan::InputDelta(FEditorViewportClient* InViewportClient, FVi
 void FRoadTool_RoadPlan::Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI)
 {
 	DrawRoads(PDI, false);
-	if (ARoadActor* SelectedRoad = GetSelectedRoad())
+	if (ARoadActor* SelectedRoad = GetSelectedRoad(); IsValid(SelectedRoad))
 	{
 		for (int i = 0; i < SelectedRoad->RoadPoints.Num(); i++)
 		{
@@ -511,7 +634,7 @@ bool FRoadTool_RoadHeight::InputDelta(FEditorViewportClient* InViewportClient, F
 void FRoadTool_RoadHeight::Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI)
 {
 	DrawRoads(PDI, false);
-	if (ARoadActor* SelectedRoad = GetSelectedRoad())
+	if (ARoadActor* SelectedRoad = GetSelectedRoad(); IsValid(SelectedRoad) && SelectedRoad->BaseCurve)
 	{
 		for (int i = 0; i < SelectedRoad->HeightPoints.Num(); i++)
 		{
@@ -1576,29 +1699,53 @@ int FEdModeRoad::GetToolIndex()
 
 void FEdModeRoad::SetToolIndex(int Index)
 {
-	static_cast<FRoadTool*>(Tools[Index])->Reset();
-	SetCurrentTool(Tools[Index]);
+	if (!Tools.IsValidIndex(Index))
+	{
+		return;
+	}
+
+	FRoadTool* RoadTool = static_cast<FRoadTool*>(Tools[Index]);
+	if (!RoadTool)
+	{
+		return;
+	}
+
+	RoadTool->Reset();
+	SetCurrentTool(RoadTool);
 	FEditorViewportClient* Client = GLevelEditorModeTools().GetFocusedViewportClient();
 	if (Client)
+	{
 		Client->Invalidate();
+	}
 }
 
 void FEdModeRoad::OnUndo(const FTransactionContext& InTransactionContext, bool bSucceeded)
 {
-	Scene->Rebuild();
+	if (Scene)
+	{
+		Scene->Rebuild();
+	}
 }
 
 void FEdModeRoad::OnRedo(const FTransactionContext& InTransactionContext, bool bSucceeded)
 {
-	Scene->Rebuild();
+	if (Scene)
+	{
+		Scene->Rebuild();
+	}
 }
 
 void FEdModeRoad::Enter()
 {
 	FEdMode::Enter();
-	UTransBuffer* TransBuffer = CastChecked<UTransBuffer>(GEditor->Trans);
-	TransBuffer->OnUndo().AddRaw(this, &FEdModeRoad::OnUndo);
-	TransBuffer->OnRedo().AddRaw(this, &FEdModeRoad::OnRedo);
+	if (GEditor && GEditor->Trans)
+	{
+		if (UTransBuffer* TransBuffer = Cast<UTransBuffer>(GEditor->Trans))
+		{
+			TransBuffer->OnUndo().AddRaw(this, &FEdModeRoad::OnUndo);
+			TransBuffer->OnRedo().AddRaw(this, &FEdModeRoad::OnRedo);
+		}
+	}
 	if (!Toolkit.IsValid())
 	{
 		Toolkit = MakeShareable(new FRoadEdModeToolkit);
@@ -1606,77 +1753,125 @@ void FEdModeRoad::Enter()
 		Toolkit->SetCurrentPalette(TEXT("Road"));
 	}
 	GLevelEditorModeTools().SetCoordSystem(COORD_Local);
-	Scene = Cast<ARoadScene>(UGameplayStatics::GetActorOfClass(GetWorld(), ARoadScene::StaticClass()));
-	if (!Scene)
-		Scene = GetWorld()->SpawnActor<ARoadScene>();
+	if (UWorld* World = GetWorld())
+	{
+		Scene = Cast<ARoadScene>(UGameplayStatics::GetActorOfClass(World, ARoadScene::StaticClass()));
+		if (!Scene)
+		{
+			Scene = World->SpawnActor<ARoadScene>();
+		}
+	}
 }
 
 void FEdModeRoad::Exit()
 {
 	Scene = nullptr;
 	SelectedRoad = nullptr;
+	SelectedGround = nullptr;
 	SelectedJunction = nullptr;
-	FToolkitManager::Get().CloseToolkit(Toolkit.ToSharedRef());
-	Toolkit.Reset();
-	UTransBuffer* TransBuffer = CastChecked<UTransBuffer>(GEditor->Trans);
-	TransBuffer->OnUndo().RemoveAll(this);
-	TransBuffer->OnRedo().RemoveAll(this);
+	if (Toolkit.IsValid())
+	{
+		FToolkitManager::Get().CloseToolkit(Toolkit.ToSharedRef());
+		Toolkit.Reset();
+	}
+	if (GEditor && GEditor->Trans)
+	{
+		if (UTransBuffer* TransBuffer = Cast<UTransBuffer>(GEditor->Trans))
+		{
+			TransBuffer->OnUndo().RemoveAll(this);
+			TransBuffer->OnRedo().RemoveAll(this);
+		}
+	}
 	FEdMode::Exit();
 }
 
 void FEdModeRoad::NotifyPreChange(FProperty* PropertyAboutToChange)
 {
 	const FScopedTransaction Transaction(LOCTEXT("NotifyPreChange", "NotifyPreChange"));
-	static_cast<FRoadTool*>(CurrentTool)->NotifyPreChange(PropertyAboutToChange);
+	if (FRoadTool* RoadTool = static_cast<FRoadTool*>(CurrentTool))
+	{
+		RoadTool->NotifyPreChange(PropertyAboutToChange);
+	}
 }
 
 void FEdModeRoad::PostUndo()
 {
-	static_cast<FRoadTool*>(CurrentTool)->Reset();
+	if (FRoadTool* RoadTool = static_cast<FRoadTool*>(CurrentTool))
+	{
+		RoadTool->Reset();
+	}
 }
 
 bool FEdModeRoad::GetCursor(EMouseCursor::Type& OutCursor) const
 {
 	FEditorViewportClient* Client = GLevelEditorModeTools().GetFocusedViewportClient();
 	if (!Client || !Client->Viewport)
-		return false;
+	{
+		return FEdMode::GetCursor(OutCursor);
+	}
 	HHitProxy* HitProxy = Client->Viewport->GetHitProxy(Client->GetCachedMouseX(), Client->GetCachedMouseY());
 	if (HitProxy)
 	{
 		OutCursor = HitProxy->IsA(HActor::StaticGetType()) ? EMouseCursor::Default : HitProxy->GetMouseCursor();
 		return true;
 	}
-	return false;
+	return FEdMode::GetCursor(OutCursor);
 }
 
 bool FEdModeRoad::ShouldDrawWidget() const
 {
-	if (((FRoadTool*)CurrentTool)->ShouldDrawWidget())
-		return true;
+	if (FRoadTool* RoadTool = static_cast<FRoadTool*>(CurrentTool))
+	{
+		if (RoadTool->ShouldDrawWidget())
+		{
+			return true;
+		}
+	}
 	return FEdMode::ShouldDrawWidget();
 }
 
 FVector FEdModeRoad::GetWidgetLocation() const
 {
-	return ((FRoadTool*)CurrentTool)->GetWidgetLocation();
+	if (FRoadTool* RoadTool = static_cast<FRoadTool*>(CurrentTool))
+	{
+		return RoadTool->GetWidgetLocation();
+	}
+	return FEdMode::GetWidgetLocation();
 }
 
 bool FEdModeRoad::GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData)
 {
-	return ((FRoadTool*)CurrentTool)->GetCustomDrawingCoordinateSystem(InMatrix, InData);
+	if (FRoadTool* RoadTool = static_cast<FRoadTool*>(CurrentTool))
+	{
+		return RoadTool->GetCustomDrawingCoordinateSystem(InMatrix, InData);
+	}
+	return FEdMode::GetCustomDrawingCoordinateSystem(InMatrix, InData);
 }
 
 EAxisList::Type FEdModeRoad::GetWidgetAxisToDraw(UE::Widget::EWidgetMode InWidgetMode) const
 {
 	if (InWidgetMode != UE::Widget::WM_Translate)
 		return EAxisList::None;
-	return ((FRoadTool*)CurrentTool)->GetWidgetAxisToDraw();
+	if (FRoadTool* RoadTool = static_cast<FRoadTool*>(CurrentTool))
+	{
+		return RoadTool->GetWidgetAxisToDraw();
+	}
+	return FEdMode::GetWidgetAxisToDraw(InWidgetMode);
 }
 
 bool FEdModeRoad::HandleClick(FEditorViewportClient* InViewportClient, HHitProxy* HitProxy, const FViewportClick& Click)
 {
-	if (((FRoadTool*)CurrentTool)->HandleClick(InViewportClient, HitProxy, Click))
-		return true;
+	if (FRoadTool* RoadTool = static_cast<FRoadTool*>(CurrentTool))
+	{
+		if (RoadTool->HandleClick(InViewportClient, HitProxy, Click))
+		{
+			return true;
+		}
+	}
+	else
+	{
+		return FEdMode::HandleClick(InViewportClient, HitProxy, Click);
+	}
 #if 0
 	if (Click.GetKey() == EKeys::RightMouseButton)
 	{

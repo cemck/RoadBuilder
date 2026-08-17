@@ -1,0 +1,5 @@
+*.uasset binary
+*.umap binary
+*.ubulk binary
+*.uexp binary
+*.locres binary

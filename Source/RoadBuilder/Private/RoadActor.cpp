@@ -3,8 +3,199 @@
 
 #include "RoadActor.h"
 #include "RoadScene.h"
+#include "RoadBuilderSettings.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/DecalComponent.h"
+#include "Materials/MaterialInterface.h"
+
+namespace
+{
+bool AreRuntimeRoadPointsValid(const TArray<FVector>& WorldPoints)
+{
+	if (WorldPoints.Num() < 2)
+	{
+		return false;
+	}
+
+	for (int32 Index = 1; Index < WorldPoints.Num(); ++Index)
+	{
+		const FVector2D Previous(WorldPoints[Index - 1].X, WorldPoints[Index - 1].Y);
+		const FVector2D Current(WorldPoints[Index].X, WorldPoints[Index].Y);
+		if (FVector2D::Distance(Previous, Current) <= KINDA_SMALL_NUMBER)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void GetRuntimeRoadPoints(const ARoadActor* Road, TArray<FVector>& OutWorldPoints)
+{
+	OutWorldPoints.Reset();
+	if (!Road)
+	{
+		return;
+	}
+
+	OutWorldPoints.Reserve(Road->RoadPoints.Num());
+	for (int32 Index = 0; Index < Road->RoadPoints.Num(); ++Index)
+	{
+		const FRoadPoint& RoadPoint = Road->RoadPoints[Index];
+		const double Height = Road->HeightPoints.IsValidIndex(Index) ? Road->HeightPoints[Index].Height : 0.0;
+		OutWorldPoints.Add(FVector(RoadPoint.Pos.X, RoadPoint.Pos.Y, Height));
+	}
+}
+
+URoadStyle* GetConfiguredRuntimeRoadStyle()
+{
+	return GetMutableDefault<USettings_RoadPlan>()->Style.LoadSynchronous();
+}
+
+ULaneShape* CreateDefaultRuntimeDrivingShape(ARoadActor* Road)
+{
+	ULaneShape* Shape = NewObject<ULaneShape>(Road, NAME_None, RF_Transient);
+	FLaneCrossSection& Surface = Shape->CrossSections.AddDefaulted_GetRef();
+	Surface.Alignment = ELaneAlignment::Up;
+	Surface.Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/EngineMaterials/WorldGridMaterial.WorldGridMaterial"));
+	Surface.UVScale = FVector2D(1.0, 1.0);
+	Surface.Points.Add(FVector2D::ZeroVector);
+	Surface.Points.Add(FVector2D::ZeroVector);
+	return Shape;
+}
+
+void AddDefaultRuntimeRoadLanes(ARoadActor* Road)
+{
+	if (!Road || !Road->BaseCurve)
+	{
+		return;
+	}
+
+	FRoadLaneStyle DrivingLane;
+	DrivingLane.Width = 350.0;
+	DrivingLane.LaneType = ELaneType::Driving;
+	DrivingLane.LaneShape = CreateDefaultRuntimeDrivingShape(Road);
+
+	Road->AddLane(Road->BaseCurve, nullptr, DrivingLane);
+	Road->AddLane(nullptr, Road->BaseCurve, DrivingLane);
+}
+}
+
+bool ARoadActor::RuntimeSetRoadPoints(const TArray<FVector>& WorldPoints, bool bRebuildScene)
+{
+	if (!AreRuntimeRoadPointsValid(WorldPoints))
+	{
+		return false;
+	}
+
+	if (!BaseCurve || !Boundaries.Contains(BaseCurve))
+	{
+		Init(WorldPoints[0].Z);
+	}
+
+	const TArray<FRoadPoint> PreviousRoadPoints = RoadPoints;
+	const TArray<FHeightPoint> PreviousHeightPoints = HeightPoints;
+	RoadPoints.Reset(WorldPoints.Num());
+	HeightPoints.Reset(WorldPoints.Num());
+
+	double Distance = 0.0;
+	for (int32 Index = 0; Index < WorldPoints.Num(); ++Index)
+	{
+		if (Index > 0)
+		{
+			const FVector2D Previous(WorldPoints[Index - 1].X, WorldPoints[Index - 1].Y);
+			const FVector2D Current(WorldPoints[Index].X, WorldPoints[Index].Y);
+			Distance += FVector2D::Distance(Previous, Current);
+		}
+
+		FRoadPoint RoadPoint = PreviousRoadPoints.IsValidIndex(Index) ? PreviousRoadPoints[Index] : FRoadPoint();
+		RoadPoint.Pos = FVector2D(WorldPoints[Index].X, WorldPoints[Index].Y);
+		RoadPoint.Dist = Distance;
+		RoadPoints.Add(RoadPoint);
+
+		FHeightPoint HeightPoint = PreviousHeightPoints.IsValidIndex(Index) ? PreviousHeightPoints[Index] : FHeightPoint();
+		HeightPoint.Dist = Distance;
+		HeightPoint.Height = WorldPoints[Index].Z;
+		HeightPoints.Add(HeightPoint);
+	}
+
+	RuntimeRefresh(bRebuildScene);
+	return true;
+}
+
+bool ARoadActor::RuntimeAddRoadPoint(const FVector& WorldPoint, int32 InsertIndex, bool bRebuildScene)
+{
+	TArray<FVector> WorldPoints;
+	GetRuntimeRoadPoints(this, WorldPoints);
+	const int32 TargetIndex = InsertIndex == INDEX_NONE ? WorldPoints.Num() : FMath::Clamp(InsertIndex, 0, WorldPoints.Num());
+	WorldPoints.Insert(WorldPoint, TargetIndex);
+	return RuntimeSetRoadPoints(WorldPoints, bRebuildScene);
+}
+
+bool ARoadActor::RuntimeSetRoadPoint(int32 PointIndex, const FVector& WorldPoint, bool bRebuildScene)
+{
+	TArray<FVector> WorldPoints;
+	GetRuntimeRoadPoints(this, WorldPoints);
+	if (!WorldPoints.IsValidIndex(PointIndex))
+	{
+		return false;
+	}
+
+	WorldPoints[PointIndex] = WorldPoint;
+	return RuntimeSetRoadPoints(WorldPoints, bRebuildScene);
+}
+
+bool ARoadActor::RuntimeRemoveRoadPoint(int32 PointIndex, bool bRebuildScene)
+{
+	TArray<FVector> WorldPoints;
+	GetRuntimeRoadPoints(this, WorldPoints);
+	if (WorldPoints.Num() <= 2 || !WorldPoints.IsValidIndex(PointIndex))
+	{
+		return false;
+	}
+
+	WorldPoints.RemoveAt(PointIndex);
+	return RuntimeSetRoadPoints(WorldPoints, bRebuildScene);
+}
+
+void ARoadActor::RuntimeRefresh(bool bRebuildScene)
+{
+	if (RoadPoints.Num() < 2 || HeightPoints.Num() < 2 || !BaseCurve)
+	{
+		return;
+	}
+
+	UpdateCurve();
+
+	if (bRebuildScene)
+	{
+		if (ARoadScene* Scene = GetScene())
+		{
+			Scene->Rebuild();
+			return;
+		}
+
+		TArray<FJunctionSlot> EmptySlots;
+		BuildMesh(EmptySlots);
+	}
+}
+
+FVector ARoadActor::RuntimeGetRoadPoint(int32 PointIndex) const
+{
+	if (!RoadPoints.IsValidIndex(PointIndex))
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FRoadPoint& RoadPoint = RoadPoints[PointIndex];
+	const double Height = HeightPoints.IsValidIndex(PointIndex) ? HeightPoints[PointIndex].Height : 0.0;
+	return FVector(RoadPoint.Pos.X, RoadPoint.Pos.Y, Height);
+}
+
+double ARoadActor::RuntimeGetRoadLength() const
+{
+	return RoadSegments.Num() ? RoadSegments.Last().Dist + RoadSegments.Last().Length : 0.0;
+}
 
 URoadStyle* URoadStyle::Create(URoadBoundary* SrcBoundary, int SrcSide, URoadBoundary* DstBoundary, int DstSide, bool SkipSidewalks, bool KeepLeftLanes, uint32 LeftLaneMarkingMask, uint32 RightLaneMarkingMask)
 {
@@ -1137,26 +1328,21 @@ void ARoadActor::InitWithStyle(URoadStyle* Style, double Height)
 {
 	Init(Height);
 	URoadLane* Lane = nullptr;
-	if (Style)
+	URoadStyle* EffectiveStyle = Style ? Style : GetConfiguredRuntimeRoadStyle();
+	if (EffectiveStyle)
 	{
-		bHasGround = Style->bHasGround;
-		BaseCurve->Segments[0].LaneMarking = Style->BaseCurveMark;
-		BaseCurve->Segments[0].Props = Style->BaseCurveProps;
-		for (int i = 0; i < Style->RightLanes.Num(); i++)
-			Lane = AddLane(i > 0 ? Lane->RightBoundary : BaseCurve, nullptr, Style->RightLanes[i]);
-		for (int i = 0; i < Style->LeftLanes.Num(); i++)
-			Lane = AddLane(nullptr, i > 0 ? Lane->LeftBoundary : BaseCurve, Style->LeftLanes[i]);
+		bHasGround = EffectiveStyle->bHasGround;
+		BaseCurve->Segments[0].LaneMarking = EffectiveStyle->BaseCurveMark;
+		BaseCurve->Segments[0].Props = EffectiveStyle->BaseCurveProps;
+		for (int i = 0; i < EffectiveStyle->RightLanes.Num(); i++)
+			Lane = AddLane(i > 0 ? Lane->RightBoundary : BaseCurve, nullptr, EffectiveStyle->RightLanes[i]);
+		for (int i = 0; i < EffectiveStyle->LeftLanes.Num(); i++)
+			Lane = AddLane(nullptr, i > 0 ? Lane->LeftBoundary : BaseCurve, EffectiveStyle->LeftLanes[i]);
 	}
-	/*
 	else
 	{
-		Lane = AddLane(BaseCurve, nullptr, { 350 });
-		Lane = AddLane(Lane->RightBoundary, nullptr, { 50 });
-		Lane = AddLane(Lane->RightBoundary, nullptr, { 350 });
-		Lane = AddLane(nullptr, BaseCurve, { 350 });
-		Lane = AddLane(nullptr, Lane->LeftBoundary, { 50 });
-		Lane = AddLane(nullptr, Lane->LeftBoundary, { 350 });
-	}*/
+		AddDefaultRuntimeRoadLanes(this);
+	}
 }
 
 void ARoadActor::InitWithRoads(URoadBoundary* Base, int Side, bool SkipSidewalks, bool KeepLeftLanes, uint32 LeftLaneMarkingMask, uint32 RightLaneMarkingMask)

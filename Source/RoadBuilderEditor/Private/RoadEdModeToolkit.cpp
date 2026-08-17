@@ -3,6 +3,8 @@
 
 #include "RoadEdModeToolkit.h"
 #include "RoadEdMode.h"
+#include "Framework/Commands/Commands.h"
+#include "Styling/AppStyle.h"
 
 FName PaletteName_File = TEXT("File");
 FName PaletteName_Road = TEXT("Road");

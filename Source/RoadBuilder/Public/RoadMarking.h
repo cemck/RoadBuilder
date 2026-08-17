@@ -30,7 +30,7 @@ public:
 	UStaticMesh* Mesh = nullptr;
 
 	UPROPERTY(EditAnywhere, Category = Point)
-	FVector2D Point;
+	FVector2D Point = FVector2D::ZeroVector;
 };
 
 USTRUCT()
@@ -55,7 +55,7 @@ struct FMarkingCurvePoint
 		*(&Pos + Index) += Delta;
 	}
 	UPROPERTY(EditAnywhere, Category = Point)
-	FVector2D Pos;
+	FVector2D Pos = FVector2D::ZeroVector;
 
 	UPROPERTY(EditAnywhere, Category = Point)
 	FVector2D In = FVector2D::ZeroVector;
