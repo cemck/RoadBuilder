@@ -420,6 +420,8 @@ URoadBoundary* ARoadActor::GetRoadBorder(int Side)
 URoadBoundary* ARoadActor::GetBoundary(const FVector2D& UV)
 {
 	URoadLane* Lane = GetLane(UV);
+	if (!Lane)
+		return nullptr;
 	double LeftDist = FMath::Abs(Lane->LeftBoundary->GetOffset(UV.X) - UV.Y);
 	double RightDist = FMath::Abs(Lane->RightBoundary->GetOffset(UV.X) - UV.Y);
 	return LeftDist < RightDist ? Lane->LeftBoundary : Lane->RightBoundary;
@@ -681,16 +683,26 @@ void ARoadActor::ConnectTo(int& PointIndex, ARoadActor* Parent)
 	if (!IsUVValid(UV))
 		return;
 	URoadBoundary* Boundary = Parent->GetBoundary(UV);
+	if (!Boundary)
+		return;
 	ARoadScene* TrafficScene = Parent->GetScene();
-	double Sign = TrafficScene
+	const double ParentTrafficSign = TrafficScene
 		? TrafficScene->GetTrafficDirectionSignForSide(Boundary->GetSide())
 		: (Boundary->GetSide() == RD_LEFT ? -1.0 : 1.0);
-	FVector ParentDir = Parent->GetDir(UV.X) * Sign;
-	FVector Dir = GetDir(PointIndex > 0 ? Length() : 0);
+	// RoadBuilder ramp styles keep their driving lanes on the physical right side.
+	// In LHT those lanes travel against increasing spline distance, so both the
+	// parent and child travel vectors must be mapped.  Flipping only ParentDir
+	// rejects the correctly reversed LHT ramp at the original 45-degree check.
+	const double ChildTrafficSign = TrafficScene
+		? TrafficScene->GetTrafficDirectionSignForSide(RD_RIGHT)
+		: 1.0;
+	FVector ParentDir = Parent->GetDir(UV.X) * ParentTrafficSign;
+	FVector Dir = GetDir(PointIndex > 0 ? Length() : 0) * ChildTrafficSign;
 	if ((ParentDir | Dir) < 0.7071)
 		return;
 	double Snap = 800;
-	if ((PointIndex > 0) ^ (Sign < 0))
+	const bool bChildTravelEnd = (PointIndex > 0) ^ (ChildTrafficSign < 0.0);
+	if (bChildTravelEnd ^ (ParentTrafficSign < 0.0))
 	{
 		if (FMath::IsNearlyEqual(UV.X, 0, Snap))
 		{

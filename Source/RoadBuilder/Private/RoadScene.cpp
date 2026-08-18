@@ -343,6 +343,7 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 	int DstSide = Index == CornerIndex ? GeometryDstSide : TrafficDstSide;
 	bool SrcRamp = Gate.IsRampOf(Next);
 	bool DstRamp = Next.IsRampOf(Gate);
+	const bool bRampGoreCorner = Index == CornerIndex && (SrcRamp || DstRamp);
 	double SrcCorner, DstCorner;
 	URoadBoundary *SrcBoundary, *DstBoundary;
 	bool SkipSidewalks = Index != CornerIndex;
@@ -400,6 +401,22 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 	if (!Link.Road)
 	{
 		URoadStyle* Style = URoadStyle::Create(SrcBoundary, SrcSide, DstBoundary, DstSide, SkipSidewalks, true, LeftLaneMarkingMask, RightLaneMarkingMask);
+		// Props on the geometric corner boundary are appropriate for ordinary
+		// intersections, but a ramp merge/diverge corner is the painted gore nose.
+		// Copying the source edge props here wraps curbs and guardrails around the
+		// inside of the fork and prevents the clean road-surface joint.
+		if (bRampGoreCorner)
+		{
+			Style->BaseCurveProps = nullptr;
+			for (FRoadLaneStyle& LaneStyle : Style->LeftLanes)
+			{
+				LaneStyle.Props = nullptr;
+			}
+			for (FRoadLaneStyle& LaneStyle : Style->RightLanes)
+			{
+				LaneStyle.Props = nullptr;
+			}
+		}
 		if (Style->NumDrivingLanes() > 0 || Index == CornerIndex)
 		{
 			Link.CreateRoad(this);
@@ -408,6 +425,22 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 	}
 	else
 		Link.Road->ClearSegments();
+	if (Link.Road && bRampGoreCorner)
+	{
+		// Existing saved junction links keep their generated style between
+		// rebuilds, so remove inherited props from their boundaries as well.
+		for (URoadBoundary* Boundary : Link.Road->Boundaries)
+		{
+			if (!Boundary)
+			{
+				continue;
+			}
+			for (FBoundarySegment& Segment : Boundary->Segments)
+			{
+				Segment.Props = nullptr;
+			}
+		}
+	}
 	if (Link.Road)
 	{
 		if (SrcBoundary == DstBoundary)
@@ -533,7 +566,7 @@ void AJunctionActor::Build()
 					Shapes.FindOrAdd(Shape)++;
 		}
 	}
-	if (!FMath::IsNearlyZero(CalcOBB(CornerPoints).GetSize().Y))
+	if (Shapes.Num() > 0 && !FMath::IsNearlyZero(CalcOBB(CornerPoints).GetSize().Y))
 	{
 		Shapes.ValueSort([](int A, int B)->bool {return A > B; });
 		ULaneShape* Shape = TMap<ULaneShape*, int>::TIterator(Shapes)->Key;
@@ -552,6 +585,24 @@ void AJunctionActor::Build()
 void AJunctionActor::BuildGoreMarkings()
 {
 	DebugCurves.Empty();
+	UPolygonMarkStyle* FillStyle = GetMutableDefault<USettings_Global>()->DefaultGoreMarking.LoadSynchronous();
+	// A previous handedness build may have stored the generated polygon on a
+	// different junction link.  Clear only generated gore-fill curves from link
+	// roads before rebuilding so the obsolete stretched polygon cannot survive.
+	for (FJunctionGate& ExistingGate : Gates)
+	{
+		for (FJunctionLink& ExistingLink : ExistingGate.Links)
+		{
+			if (!ExistingLink.Road)
+				continue;
+			for (int MarkingIndex = ExistingLink.Road->Markings.Num() - 1; MarkingIndex >= 0; --MarkingIndex)
+			{
+				UMarkingCurve* ExistingCurve = Cast<UMarkingCurve>(ExistingLink.Road->Markings[MarkingIndex]);
+				if (ExistingCurve && ExistingCurve->FillStyle == FillStyle)
+					ExistingLink.Road->DeleteMarking(ExistingCurve);
+			}
+		}
+	}
 	for (int i = 0; i < Gates.Num(); i++)
 	{
 		int j = (i + 1) % Gates.Num();
@@ -565,31 +616,78 @@ void AJunctionActor::BuildGoreMarkings()
 		{
 			int k = SrcConn != INDEX_NONE ? SrcConn : DstConn;
 			double Sign = SrcConn != INDEX_NONE ? Gate.Sign : Next.Sign;
-			FJunctionGate& Conn = Gates[k];
 			FJunctionLink& Corner = Gate.Links[1];
-			TArray<URoadBoundary*> CornerBoundaries = Corner.Road->GetBoundaries(1, { ELaneMarkType::Solid });
-			FJunctionLink& SrcLink = Sign > 0 ? Gates[k].Links[(i - k + Gates.Num()) % Gates.Num()] : Gate.Links[(k - i + Gates.Num()) % Gates.Num()];
-			FJunctionLink& DstLink = Sign > 0 ? Gates[k].Links[(j - k + Gates.Num()) % Gates.Num()] : Next.Links[(k - j + Gates.Num()) % Gates.Num()];
-			if (!SrcLink.Road || !DstLink.Road)
+			if (!Corner.Road)
 				continue;
-			ARoadScene* Scene = GetScene();
-			const int SrcTrafficSide = Scene
-				? Scene->GetTrafficSideForDirection(-Sign)
-				: (Sign > 0 ? RD_LEFT : RD_RIGHT);
-			const int DstTrafficSide = Scene
-				? Scene->GetTrafficSideForDirection(Sign)
-				: (Sign > 0 ? RD_RIGHT : RD_LEFT);
-			TArray<URoadBoundary*> SrcBoundaries = SrcLink.Road->GetBoundaries(SrcTrafficSide, { ELaneMarkType::Solid });
-			TArray<URoadBoundary*> DstBoundaries = DstLink.Road->GetBoundaries(DstTrafficSide, { ELaneMarkType::Solid });
+			TArray<URoadBoundary*> CornerBoundaries = Corner.Road->GetBoundaries(1, { ELaneMarkType::Solid });
+			auto GetSourceLink = [&](double DirectionSign)->FJunctionLink*
+			{
+				return DirectionSign > 0
+					? &Gates[k].Links[(i - k + Gates.Num()) % Gates.Num()]
+					: &Gate.Links[(k - i + Gates.Num()) % Gates.Num()];
+			};
+			auto GetDestinationLink = [&](double DirectionSign)->FJunctionLink*
+			{
+				return DirectionSign > 0
+					? &Gates[k].Links[(j - k + Gates.Num()) % Gates.Num()]
+					: &Next.Links[(k - j + Gates.Num()) % Gates.Num()];
+			};
+			FJunctionLink* SrcLink = GetSourceLink(Sign);
+			FJunctionLink* DstLink = GetDestinationLink(Sign);
+			if (!SrcLink->Road || !DstLink->Road)
+			{
+				FJunctionLink* AlternateSrcLink = GetSourceLink(-Sign);
+				FJunctionLink* AlternateDstLink = GetDestinationLink(-Sign);
+				if (AlternateSrcLink->Road && AlternateDstLink->Road)
+				{
+					Sign = -Sign;
+					SrcLink = AlternateSrcLink;
+					DstLink = AlternateDstLink;
+				}
+			}
+			if (!SrcLink->Road || !DstLink->Road)
+				continue;
+			TArray<URoadBoundary*> SrcBoundaries = SrcLink->Road->GetBoundaries(Sign > 0 ? 1 : 0, { ELaneMarkType::Solid });
+			TArray<URoadBoundary*> DstBoundaries = DstLink->Road->GetBoundaries(Sign > 0 ? 0 : 1, { ELaneMarkType::Solid });
 			if (CornerBoundaries.Num() && SrcBoundaries.Num() && DstBoundaries.Num())
 			{
 				URoadBoundary* CornerBoundary = CornerBoundaries.Last();
 				URoadBoundary* SrcBoundary = SrcBoundaries.Last();
 				URoadBoundary* DstBoundary = DstBoundaries.Last();
+				auto HasUsableCurve = [](const URoadBoundary* Boundary)
+				{
+					return Boundary && Boundary->Curve.Points.Num() >= 2 &&
+						Boundary->Curve.Points[0].Dist < Boundary->Curve.Points.Last().Dist;
+				};
+				if (!HasUsableCurve(CornerBoundary) || !HasUsableCurve(SrcBoundary) || !HasUsableCurve(DstBoundary))
+					continue;
 				DebugCurves.Add(SrcBoundary->Curve);
 				DebugCurves.Add(DstBoundary->Curve);
 				double Dist1, Dist2;
-				if (SrcBoundary->Curve.SolveIntersection(DstBoundary->Curve, Dist1, Dist2))
+				bool bHasIntersection = SrcBoundary->Curve.SolveIntersection(DstBoundary->Curve, Dist1, Dist2);
+				if (!bHasIntersection)
+				{
+					// Preserve the original gore construction below.  Edited lane widths
+					// can make the same two boundaries finish at adjacent endpoints rather
+					// than mathematically cross, so accept only a small shared-nose gap as
+					// the original intersection input.  Do not change the marking owner or
+					// project the polygon onto the corner road; that stretches it down the
+					// entire connector.
+					const bool bNoseAtEnd = Sign > 0;
+					const double SrcLength = SrcBoundary->Curve.Points.Last().Dist;
+					const double DstLength = DstBoundary->Curve.Points.Last().Dist;
+					const FVector Pos1 = bNoseAtEnd ? SrcBoundary->Curve.Points.Last().Pos : SrcBoundary->Curve.Points[0].Pos;
+					const FVector Pos2 = bNoseAtEnd ? DstBoundary->Curve.Points.Last().Pos : DstBoundary->Curve.Points[0].Pos;
+					bHasIntersection = FVector::Dist2D(Pos1, Pos2) <= 400.0;
+					if (bHasIntersection)
+					{
+						const double SrcInset = FMath::Min(100.0, SrcLength * 0.25);
+						const double DstInset = FMath::Min(100.0, DstLength * 0.25);
+						Dist1 = bNoseAtEnd ? SrcLength - SrcInset : SrcInset;
+						Dist2 = bNoseAtEnd ? DstLength - DstInset : DstInset;
+					}
+				}
+				if (bHasIntersection)
 				{
 					TArray<FVector2D> Points;
 					ARoadActor* MarkingRoad = SrcConn != INDEX_NONE ? DstBoundary->GetRoad() : SrcBoundary->GetRoad();
@@ -626,7 +724,6 @@ void AJunctionActor::BuildGoreMarkings()
 					End = Sign > 0 ? DstBoundary->SegmentStart(!NoneIndex) : DstBoundary->SegmentEnd(!NoneIndex);
 					FPolyline DstCurve = DstBoundary->Curve.SubCurve(Start, End);
 					AddPoints(DstCurve);
-					UPolygonMarkStyle* FillStyle = GetMutableDefault<USettings_Global>()->DefaultGoreMarking.LoadSynchronous();
 					UMarkingCurve* Marking = MarkingRoad->GetMarkingCurve(FillStyle);
 					if (!Marking)
 					{
