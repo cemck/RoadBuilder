@@ -476,6 +476,7 @@ bool FRoadBuilderRampSnappingAndForkTopologyTest::RunTest(const FString& Paramet
 		// the scene must not replace them with the global default dash/solid styles.
 		ULaneMarkStyle* JunctionMarkingOverride = NewObject<ULaneMarkStyle>(Scene);
 		JunctionMarkingOverride->MarkType = ELaneMarkType::Solid;
+		URoadProps* JunctionPropsOverride = NewObject<URoadProps>(Scene);
 		TArray<TWeakObjectPtr<ARoadActor>> EditedLinkRoads;
 		for (AJunctionActor* Junction : Scene->Junctions)
 		{
@@ -493,7 +494,10 @@ bool FRoadBuilderRampSnappingAndForkTopologyTest::RunTest(const FString& Paramet
 						if (!IsValid(Boundary))
 							continue;
 						for (FBoundarySegment& Segment : Boundary->Segments)
+						{
 							Segment.LaneMarking = JunctionMarkingOverride;
+							Segment.Props = JunctionPropsOverride;
+						}
 					}
 				}
 			}
@@ -518,6 +522,10 @@ bool FRoadBuilderRampSnappingAndForkTopologyTest::RunTest(const FString& Paramet
 						FString::Printf(TEXT("A %s junction marking override survives Apply/Rebuild"), HandednessName),
 						Segment.LaneMarking,
 						JunctionMarkingOverride);
+					TestEqual(
+						FString::Printf(TEXT("A %s junction outer-props override survives Apply/Rebuild"), HandednessName),
+						Segment.Props,
+						JunctionPropsOverride);
 				}
 			}
 		}

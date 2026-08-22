@@ -580,22 +580,6 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 		// DefaultDashStyle/DefaultSolidStyle every time any marking is edited.
 		Link.Road->ClearSegments();
 	}
-	if (Link.Road && bRampGoreCorner)
-	{
-		// Existing saved junction links keep their generated style between
-		// rebuilds, so remove inherited props from their boundaries as well.
-		for (URoadBoundary* Boundary : Link.Road->Boundaries)
-		{
-			if (!Boundary)
-			{
-				continue;
-			}
-			for (FBoundarySegment& Segment : Boundary->Segments)
-			{
-				Segment.Props = nullptr;
-			}
-		}
-	}
 	if (Link.Road)
 	{
 		if (SrcBoundary == DstBoundary)
