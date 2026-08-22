@@ -3,6 +3,7 @@
 
 #include "RoadScene.h"
 #include "RoadBuilder.h"
+#include "RoadBuilderWorldPartition.h"
 #include "Algo/Reverse.h"
 #include "XmlFile.h"
 #include "Engine/Level.h"
@@ -159,8 +160,12 @@ namespace
 
 void FJunctionLink::CreateRoad(AJunctionActor* Parent)
 {
-	Road = Parent->GetWorld()->SpawnActor<ARoadActor>();
-	Road->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
+	Road = Parent ? Cast<ARoadActor>(RoadBuilderWorldPartition::SpawnGeneratedActor(
+		Parent->GetWorld(), ARoadActor::StaticClass(), FTransform::Identity, Parent)) : nullptr;
+	if (Road)
+	{
+		Road->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
+	}
 }
 
 void FJunctionLink::Destroy()
@@ -1427,7 +1432,8 @@ void AJunctionActor::GenerateTrafficControl()
 
 		if (TrafficControlType == ETrafficControlType::TrafficLight)
 		{
-			ATrafficLightActor* Light = World->SpawnActor<ATrafficLightActor>(SpawnPos, Rot);
+			ATrafficLightActor* Light = Cast<ATrafficLightActor>(RoadBuilderWorldPartition::SpawnGeneratedActor(
+				World, ATrafficLightActor::StaticClass(), FTransform(FQuat(Rot), SpawnPos), this));
 			if (Light)
 			{
 				Light->GateIndex = i;
@@ -1446,7 +1452,8 @@ void AJunctionActor::GenerateTrafficControl()
 		}
 		else if (TrafficControlType == ETrafficControlType::StopSign || TrafficControlType == ETrafficControlType::YieldSign)
 		{
-			ATrafficSignActor* Sign = World->SpawnActor<ATrafficSignActor>(SpawnPos, Rot);
+			ATrafficSignActor* Sign = Cast<ATrafficSignActor>(RoadBuilderWorldPartition::SpawnGeneratedActor(
+				World, ATrafficSignActor::StaticClass(), FTransform(FQuat(Rot), SpawnPos), this));
 			if (Sign)
 			{
 				Sign->SignType = TrafficControlType;
@@ -1524,7 +1531,8 @@ void AJunctionActor::GenerateTurnArrows()
 			FVector ArrowPos = (ApproachLane->LeftBoundary->GetPos(ArrowDist) + ApproachLane->RightBoundary->GetPos(ArrowDist)) * 0.5;
 			FRotator ArrowRot = (Gate.Road->GetDir(ArrowDist) * (-Gate.Sign)).Rotation();
 
-			ATurnArrowActor* Arrow = World->SpawnActor<ATurnArrowActor>(ArrowPos, ArrowRot);
+			ATurnArrowActor* Arrow = Cast<ATurnArrowActor>(RoadBuilderWorldPartition::SpawnGeneratedActor(
+				World, ATurnArrowActor::StaticClass(), FTransform(FQuat(ArrowRot), ArrowPos), this));
 			if (Arrow)
 			{
 				Arrow->ArrowType = ArrowType;
@@ -1640,9 +1648,13 @@ void ARoadScene::ResetTrafficDerivedData()
 
 ARoadActor* ARoadScene::AddRoad()
 {
-	ARoadActor* Road = GetWorld()->SpawnActor<ARoadActor>();
-	Road->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
-	Roads.Add(Road);
+	ARoadActor* Road = Cast<ARoadActor>(RoadBuilderWorldPartition::SpawnGeneratedActor(
+		GetWorld(), ARoadActor::StaticClass(), FTransform::Identity, this));
+	if (Road)
+	{
+		Road->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+		Roads.Add(Road);
+	}
 	return Road;
 }
 
@@ -1710,6 +1722,7 @@ ARoadActor* ARoadScene::DuplicateRoad(ARoadActor* Source)
 {
 	ULevel* Level = GetWorld()->GetCurrentLevel();
 	ARoadActor* Road = CastChecked<ARoadActor>(StaticDuplicateObject(Source, Level));
+	RoadBuilderWorldPartition::SynchronizeGeneratedActor(Road, this);
 	Road->RegisterAllComponents();
 	Road->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
 	Roads.Add(Road);
@@ -1755,10 +1768,14 @@ AGroundActor* ARoadScene::AddGround(TMap<ARoadActor*, TArray<FJunctionSlot>>& Ro
 			return Ground;
 		}
 	}
-	AGroundActor* Ground = GetWorld()->SpawnActor<AGroundActor>();
-	Ground->Points = Points;
-	Ground->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
-	Grounds.Add(Ground);
+	AGroundActor* Ground = Cast<AGroundActor>(RoadBuilderWorldPartition::SpawnGeneratedActor(
+		GetWorld(), AGroundActor::StaticClass(), FTransform::Identity, this));
+	if (Ground)
+	{
+		Ground->Points = Points;
+		Ground->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+		Grounds.Add(Ground);
+	}
 	return Ground;
 }
 
@@ -1775,13 +1792,34 @@ AJunctionActor* ARoadScene::AddJunction(ARoadActor* R0, double D0, ARoadActor* R
 			return Junction;
 		}
 	}
-	AJunctionActor* Junction = GetWorld()->SpawnActor<AJunctionActor>();
+	AJunctionActor* Junction = Cast<AJunctionActor>(RoadBuilderWorldPartition::SpawnGeneratedActor(
+		GetWorld(), AJunctionActor::StaticClass(), FTransform::Identity, this));
+	if (!Junction)
+	{
+		return nullptr;
+	}
 	Junction->AddRoad(R0, D0);
 	Junction->AddRoad(R1, D1);
 	Junction->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
 	Junctions.Add(Junction);
 	return Junction;
 }
+
+void ARoadScene::SynchronizeWorldPartitionChildren()
+{
+	RoadBuilderWorldPartition::SynchronizeGeneratedChildren(this);
+}
+
+#if WITH_EDITOR
+void ARoadScene::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	// Data Layer assignment and the spatial-load flag are edited on AActor.
+	// Propagate every edit so both engine-driven and UI-driven changes stay
+	// consistent for junction links, traffic controls, props, and ground actors.
+	SynchronizeWorldPartitionChildren();
+}
+#endif
 
 #if 0
 UMarkingCurve* ARoadScene::GetMarkingCurve(TArray<FCurveCoordinate>& Coordinates)

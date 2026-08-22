@@ -16,6 +16,7 @@
 #include "ScopedTransaction.h"
 #include "RoadEdModeToolkit.h"
 #include "RoadPreset.h"
+#include "RoadBuilderWorldPartition.h"
 #include "Toolkits/ToolkitManager.h"
 #include "Containers/Ticker.h"
 
@@ -2199,7 +2200,7 @@ void FEdModeRoad::Enter()
 		Scene = Cast<ARoadScene>(UGameplayStatics::GetActorOfClass(World, ARoadScene::StaticClass()));
 		if (!Scene)
 		{
-			Scene = World->SpawnActor<ARoadScene>();
+			Scene = Cast<ARoadScene>(RoadBuilderWorldPartition::SpawnGeneratedActor(World, ARoadScene::StaticClass(), FTransform::Identity, nullptr));
 		}
 	}
 }

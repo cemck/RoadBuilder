@@ -3,6 +3,7 @@
 
 #include "RoadProps.h"
 #include "RoadScene.h"
+#include "RoadBuilderWorldPartition.h"
 #include "Engine/Blueprint.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -46,9 +47,11 @@ void URoadProps::Generate(ARoadActor* Road, const FPolyline& Baseline, FRoadActo
 				}
 				else if (UBlueprint* BP = Cast<UBlueprint>(Asset))
 				{
-					AActor* Actor = GetWorld()->SpawnActor<AActor>(BP->GeneratedClass);
-					Actor->SetActorTransform(Trans);
-					Actor->AttachToActor(Road, FAttachmentTransformRules::KeepWorldTransform);
+					AActor* Actor = RoadBuilderWorldPartition::SpawnGeneratedActor(GetWorld(), BP->GeneratedClass, Trans, Road);
+					if (Actor)
+					{
+						Actor->AttachToActor(Road, FAttachmentTransformRules::KeepWorldTransform);
+					}
 				}
 				else if (UMaterialInterface* Material = Cast<UMaterialInterface>(Asset))
 				{

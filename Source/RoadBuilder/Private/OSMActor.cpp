@@ -2,6 +2,7 @@
 // Copyright 2024. All Rights Reserved.
 
 #include "OSMActor.h"
+#include "RoadBuilderWorldPartition.h"
 #include "RoadScene.h"
 #include "RoadBuilderSettings.h"
 #include "HttpModule.h"
@@ -237,7 +238,7 @@ void AOSMActor::CreateRoad(uint64 Id)
 {
 	ARoadScene* Scene = Cast<ARoadScene>(UGameplayStatics::GetActorOfClass(GetWorld(), ARoadScene::StaticClass()));
 	if (!Scene)
-		Scene = GetWorld()->SpawnActor<ARoadScene>();
+		Scene = Cast<ARoadScene>(RoadBuilderWorldPartition::SpawnGeneratedActor(GetWorld(), ARoadScene::StaticClass(), FTransform::Identity, nullptr));
 	CreateRoad(Scene, Id);
 	Scene->Rebuild();
 }
@@ -348,7 +349,7 @@ void AOSMActor::ConvertAll()
 	{
 		ARoadScene* Scene = Cast<ARoadScene>(UGameplayStatics::GetActorOfClass(GetWorld(), ARoadScene::StaticClass()));
 		if (!Scene)
-			Scene = GetWorld()->SpawnActor<ARoadScene>();
+			Scene = Cast<ARoadScene>(RoadBuilderWorldPartition::SpawnGeneratedActor(GetWorld(), ARoadScene::StaticClass(), FTransform::Identity, nullptr));
 		for (TPair<uint64, FOSMWay>& KV : Ways)
 			if (KV.Value.IsDrivable())
 				CreateRoad(Scene, KV.Key);

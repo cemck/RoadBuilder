@@ -3,6 +3,7 @@
 
 #include "GroundActor.h"
 #include "RoadScene.h"
+#include "RoadBuilderWorldPartition.h"
 #include "Components/SplineComponent.h"
 #include "Engine/World.h"
 #include "PCGComponent.h"
@@ -309,7 +310,11 @@ void AGroundActor::CreatePCGSpline()
 {
 	TMap<ARoadActor*, TArray<FJunctionSlot>> RoadSlots = GetScene()->GetAllJunctionSlots();
 	TArray<FVector> Vertices = GetVertices(RoadSlots);
-	AActor* Actor = GetWorld()->SpawnActor<AActor>();
+	AActor* Actor = RoadBuilderWorldPartition::SpawnGeneratedActor(GetWorld(), AActor::StaticClass(), FTransform::Identity, this);
+	if (!Actor)
+	{
+		return;
+	}
 	USceneComponent* RootComp = NewObject<USceneComponent>(Actor);
 	Actor->SetRootComponent(RootComp);
 	Actor->AddInstanceComponent(RootComp);

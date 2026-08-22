@@ -358,9 +358,12 @@ public:
 	void OctreeRemoveRoad(ARoadActor* Road);
 	void DestroyRoad(ARoadActor* Road);
 	void ResetTrafficDerivedData();
+	/** Make all generated descendants use this RoadScene's WP spatial/data-layer state. */
+	void SynchronizeWorldPartitionChildren();
 	virtual void PostLoad() override;
 #if WITH_EDITOR
 	void ExportXodr();
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 
 	UPROPERTY(BlueprintReadOnly, Category = "RoadBuilder|Runtime")
