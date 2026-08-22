@@ -24,12 +24,14 @@ FVector FMarkingCurvePoint::GetOutTangent(ARoadActor* Road) { return (Road->GetP
 
 void UMarkingCurve::BuildMesh(FRoadActorBuilder& Builder)
 {
+	const int32 TriangleCountBefore = Builder.MeshBuilder.GetTriangleCount();
 	ARoadActor* Road = GetRoad();
 	FPolyline Curve = CreatePolyline();
 	if (MarkStyle)
 		MarkStyle->BuildMesh(Road, Builder.MeshBuilder, Curve);
 	if (FillStyle && bClosedLoop)
 		FillStyle->BuildMesh(this, Builder.MeshBuilder, Curve);
+	LastBuildTriangleCount = Builder.MeshBuilder.GetTriangleCount() - TriangleCountBefore;
 }
 
 void UMarkingCurve::InsertPoint(const FVector2D& Pos, int& Index)
@@ -66,14 +68,34 @@ void UMarkingCurve::MakeClose()
 
 void UMarkingCurve::SetPoints(TArray<FVector2D>& UVs)
 {
+	LastBuildTriangleCount = 0;
+	bUseGeneratedWorldPoints = false;
+	GeneratedWorldPoints.Empty();
 	Points.Empty();
 	for (FVector2D& UV : UVs)
 		Points.Add({ UV });
 }
 
+void UMarkingCurve::SetGeneratedWorldPoints(const TArray<FVector>& InWorldPoints)
+{
+	LastBuildTriangleCount = 0;
+	bUseGeneratedWorldPoints = true;
+	GeneratedWorldPoints = InWorldPoints;
+	Points.Empty();
+}
+
 FPolyline UMarkingCurve::CreatePolyline()
 {
 	FPolyline Polyline;
+	if (bUseGeneratedWorldPoints)
+	{
+		for (const FVector& Point : GeneratedWorldPoints)
+			Polyline.AddPoint(Point, 0);
+		if (bClosedLoop && GeneratedWorldPoints.Num() > 2)
+			Polyline.AddPoint(GeneratedWorldPoints[0], 0);
+		return Polyline;
+	}
+
 	ARoadActor* Road = GetRoad();
 	int Max = Points.Num() - !bClosedLoop;
 	for (int i = 0; i < Max; i++)

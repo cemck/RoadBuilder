@@ -202,6 +202,38 @@ struct FJunctionSlot
 	double InitOutputDist = MAX_dbl;
 };
 
+enum class EGoreDiagnosticState : uint8
+{
+	Blocked,
+	ReadyExactIntersection,
+	ReadyNoseGapFallback,
+};
+
+/** Transient editor feedback captured by the actual gore generation path. */
+struct ROADBUILDER_API FGoreDiagnostic
+{
+	static constexpr int32 RequirementCount = 10;
+
+	bool IsReady() const { return State != EGoreDiagnosticState::Blocked; }
+
+	int32 GateIndex = INDEX_NONE;
+	int32 NextGateIndex = INDEX_NONE;
+	int32 RequirementsMet = 0;
+	int32 PolygonPointCount = 0;
+	EGoreDiagnosticState State = EGoreDiagnosticState::Blocked;
+	FString Status;
+	FVector LabelLocation = FVector::ZeroVector;
+	FVector SourceNose = FVector::ZeroVector;
+	FVector DestinationNose = FVector::ZeroVector;
+	FVector Intersection = FVector::ZeroVector;
+	bool bHasNosePair = false;
+	bool bHasIntersection = false;
+	FPolyline SourceBoundary;
+	FPolyline DestinationBoundary;
+	FPolyline CornerBoundary;
+	TWeakObjectPtr<UMarkingCurve> Marking;
+};
+
 UCLASS()
 class ROADBUILDER_API AJunctionActor : public AActor
 {
@@ -255,6 +287,7 @@ public:
 
 	TArray<FVector> DebugPoints;
 	TArray<FPolyline> DebugCurves;
+	TArray<FGoreDiagnostic> GoreDiagnostics;
 };
 
 UCLASS(BlueprintType, Blueprintable)

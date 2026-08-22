@@ -31,6 +31,7 @@ public:
 			Positions[i] = FVector(Vertices[i], 0);
 		AddTriangles(Material, Triangles, Positions, Normal);
 	}
+	int32 GetTriangleCount() const { return MeshDescription.IsValid() ? MeshDescription->Triangles().Num() : 0; }
 	void Build(USceneComponent* Component);
 	TMap<UMaterialInterface*, FPolygonGroupID> PolygonGroups;
 	TSharedPtr<FMeshDescription> MeshDescription;
@@ -51,6 +52,13 @@ public:
 		for (int i = 0; i < Vertices.Num(); i++)
 			Positions[i] = FVector(Vertices[i], 0);
 		AddTriangles(Material, Triangles, Positions);
+	}
+	int32 GetTriangleCount() const
+	{
+		int32 TriangleCount = 0;
+		for (const TPair<UMaterialInterface*, FProcMeshSection>& Section : Sections)
+			TriangleCount += Section.Value.ProcIndexBuffer.Num() / 3;
+		return TriangleCount;
 	}
 	void Build(USceneComponent* Component);
 	TMap<UMaterialInterface*, FProcMeshSection> Sections;

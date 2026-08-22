@@ -16,6 +16,7 @@
 
 struct FJunctionSlot;
 class AJunctionActor;
+class ARoadActor;
 class ARoadScene;
 
 USTRUCT()
@@ -182,6 +183,34 @@ struct FConnectInfo
 
 	UPROPERTY()
 	FVector2D UV = FVector2D::ZeroVector;
+
+	/** Chop seam that preserves authored control points instead of adding direction handles. */
+	UPROPERTY()
+	bool bPreserveGeometry = false;
+};
+
+/**
+ * Streaming-safe endpoint attachment to a road owned by another RoadScene.
+ * The parent is deliberately soft so World Partition does not bundle every
+ * connected expressway sector into one hard-reference cluster.
+ */
+USTRUCT()
+struct FCrossRoadSceneConnection
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY(VisibleAnywhere, Category = "Road|Streaming")
+	TSoftObjectPtr<ARoadActor> Parent;
+
+	UPROPERTY(VisibleAnywhere, Category = "Road|Streaming")
+	int32 Index = INDEX_NONE;
+
+	/** 0/1 pins to a target endpoint; INDEX_NONE keeps an interior spline distance. */
+	UPROPERTY(VisibleAnywhere, Category = "Road|Streaming")
+	int32 ParentEndpoint = INDEX_NONE;
+
+	UPROPERTY(VisibleAnywhere, Category = "Road|Streaming")
+	FVector2D UV = FVector2D::ZeroVector;
 };
 
 UCLASS(BlueprintType, Blueprintable)
@@ -236,12 +265,17 @@ public:
 	UMarkingPoint* AddMarkingPoint(const FVector2D& UV);
 	UMarkingCurve* AddMarkingCurve(bool ClosedLoop = false);
 	UMarkingCurve* GetMarkingCurve(UPolygonMarkStyle* FillStyle);
+	/** Returns only an automatically generated world-space marking, never an authored editable curve. */
+	UMarkingCurve* GetGeneratedMarkingCurve(UPolygonMarkStyle* FillStyle);
 	void DeleteMarking(URoadMarking* Marking);
 	void DeleteAllMarkings();
 	void AddDirPoint(int Index);
 	void DelDirPoint(int Index);
 	void ConnectTo(int& PointIndex, ARoadActor* Parent);
-	void ConnectTo(ARoadActor* Parent, const FVector2D& UV, int Index);
+	void ConnectTo(ARoadActor* Parent, const FVector2D& UV, int Index, bool bPreserveGeometry = false);
+	bool HasCrossRoadSceneConnection(int32 Index) const;
+	bool HasCrossRoadSceneParentInScene(const ARoadScene* Scene) const;
+	void RefreshCrossRoadSceneConnections();
 	void DisconnectFrom(ARoadActor* Child, int Index);
 	void DisconnectAll();
 	void DisconnectAll(int& PointIndex);
@@ -259,10 +293,29 @@ public:
 	TArray<FHeightSegment> CutHeightSegments(double R_Start, double R_End);
 	void InsertPoint(const FVector2D& Pos, int& Index)
 	{
-		if (Index == RoadPoints.Num() - 1)
+		if (RoadPoints.IsEmpty())
+		{
 			Index = RoadPoints.AddDefaulted();
+		}
 		else
-			RoadPoints.InsertDefaulted(0);
+		{
+			// Undo/redo or switching roads can leave the editor's selected point
+			// at INDEX_NONE or at an index from the previous road. Extending the
+			// road must never use that stale value as a TArray index. In that case,
+			// continue from whichever world-space endpoint was actually clicked.
+			const bool bAppend = Index == RoadPoints.Num() - 1 ||
+				(!RoadPoints.IsValidIndex(Index) &&
+				 FVector2D::DistSquared(Pos, RoadPoints.Last().Pos) < FVector2D::DistSquared(Pos, RoadPoints[0].Pos));
+			if (bAppend)
+			{
+				Index = RoadPoints.AddDefaulted();
+			}
+			else
+			{
+				RoadPoints.InsertDefaulted(0);
+				Index = 0;
+			}
+		}
 		RoadPoints[Index].Pos = Pos;
 	}
 	int AddPoint(double Dist)
@@ -272,14 +325,14 @@ public:
 		FRoadPoint& End = RoadPoints[Index + 1];
 		FRoadPoint NewPt = { FMath::Lerp(Start.Pos, End.Pos, (Dist - Start.Dist) / (End.Dist - Start.Dist)), Dist };
 		RoadPoints.Insert(NewPt, Index + 1);
-		return Index;
+		return Index + 1;
 	}
 	int AddHeight(double Dist)
 	{
 		int Index = GetPointIndex(HeightPoints, Dist);
 		FHeightPoint NewPt = {Dist, HeightPoints[Index].Height};
 		HeightPoints.Insert(NewPt, Index+1);
-		return Index;
+		return Index + 1;
 	}
 	FRoadSegment& AddRoadSegment(double Dist, double Length, const FVector2D& StartPos, double StartRadian, double StartCurv, double EndCurv)
 	{
@@ -379,6 +432,9 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = Road)
 	TArray<FConnectInfo> ConnectedChildren;
+
+	UPROPERTY(VisibleAnywhere, Category = "Road|Streaming")
+	TArray<FCrossRoadSceneConnection> CrossRoadSceneConnections;
 };
 
 UCLASS()

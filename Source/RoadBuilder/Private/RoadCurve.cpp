@@ -104,6 +104,10 @@ ARoadActor* URoadCurve::GetRoad()
 
 FPolyline URoadCurve::CreatePolyline(double Offset)
 {
+	if (Offsets.Num() < 2)
+	{
+		return FPolyline();
+	}
 	return CreatePolyline(Offsets[0].Dist, Offsets.Last().Dist, Offset);
 }
 
@@ -136,8 +140,18 @@ FPolyline URoadCurve::CreatePolyline(double Start, double End, double Offset, do
 void URoadCurve::FillPolyline(FPolyline& Polyline, double Start, double End, double Offset, double Height)
 {
 	ARoadActor* Road = GetRoad();
+	if (!IsValid(Road) || Offsets.Num() < 2 || Road->Smoothness <= UE_DOUBLE_SMALL_NUMBER ||
+		Road->HeightSegments.IsEmpty() || (Road->RoadSegments.IsEmpty() && Road->RoadPoints.IsEmpty()) ||
+		!FMath::IsFinite(Start) || !FMath::IsFinite(End) || !FMath::IsFinite(Offset) || !FMath::IsFinite(Height))
+	{
+		return;
+	}
 	double Length = End - Start;
 	double OffsetDiff = GetOffset(End) - GetOffset(Start);
+	if (!FMath::IsFinite(OffsetDiff))
+	{
+		return;
+	}
 	int NumSegments = FMath::Max(1, FMath::RoundToInt((FMath::Abs(Length) + FMath::Abs(OffsetDiff) * 16) / Road->Smoothness));
 	for (int i = 0; i <= NumSegments; i++)
 	{
@@ -146,6 +160,11 @@ void URoadCurve::FillPolyline(FPolyline& Polyline, double Start, double End, dou
 		{
 			double R = Road->GetRadian(FMath::Lerp(Start, End, double(i) / NumSegments));
 			double NextR = Road->GetRadian(FMath::Lerp(Start, End, double(i + 1) / NumSegments));
+			if (!FMath::IsFinite(R) || !FMath::IsFinite(NextR))
+			{
+				Polyline.Points.Reset();
+				return;
+			}
 			double Diff = WrapRadian(NextR - R);
 			NumSegs = FMath::Max(NumSegs, FMath::RoundToInt(51200 * FMath::Abs(Diff) / DOUBLE_PI / Road->Smoothness));
 		}
@@ -156,9 +175,18 @@ void URoadCurve::FillPolyline(FPolyline& Polyline, double Start, double End, dou
 			double R = Road->GetRadian(S);
 			double O = GetOffset(S) + Offset;
 			double H = Road->GetHeight(S) + Height;
-			check(!FMath::IsNaN(H));
+			if (!FMath::IsFinite(R) || !FMath::IsFinite(O) || !FMath::IsFinite(H))
+			{
+				Polyline.Points.Reset();
+				return;
+			}
 			FVector Right(-FMath::Sin(R), FMath::Cos(R), 0);
 			FVector Pos = FVector(Road->GetPos(S), H) + Right * O;
+			if (Pos.ContainsNaN())
+			{
+				Polyline.Points.Reset();
+				return;
+			}
 			Polyline.AddPoint(Pos, End > Start ? R : R + DOUBLE_PI, S);
 		}
 	}
@@ -353,7 +381,7 @@ void URoadCurve::PostEditUndo()
 {
 	UObject::PostEditUndo();
 	ARoadActor* Road = GetRoad();
-	if (IsValid(Road))
+	if (!GIsTransacting && IsValid(Road))
 		Road->UpdateCurve();
 }
 #endif

@@ -298,7 +298,7 @@ void SRoadEdit::SetEditNone()
 void SRoadEdit::SetEditRoadPoint(ARoadActor* Road, int Index)
 {
 	StructDetailsView->GetOnFinishedChangingPropertiesDelegate().Clear();
-	if (Road && Index != INDEX_NONE)
+	if (IsValid(Road) && Road->RoadPoints.IsValidIndex(Index))
 	{
 		StructDetailsView->SetStructureData(MakeShareable(new FStructOnScope(FRoadPoint::StaticStruct(), (uint8*)&Road->RoadPoints[Index])));
 		StructDetailsView->GetOnFinishedChangingPropertiesDelegate().AddSP(this, &SRoadEdit::OnRoadPointPropertyChanged, Road, Index);
@@ -312,7 +312,7 @@ void SRoadEdit::SetEditRoadPoint(ARoadActor* Road, int Index)
 void SRoadEdit::SetEditHeightPoint(ARoadActor* Road, int Index)
 {
 	StructDetailsView->GetOnFinishedChangingPropertiesDelegate().Clear();
-	if (Road && Index != INDEX_NONE)
+	if (IsValid(Road) && Road->HeightPoints.IsValidIndex(Index))
 	{
 		StructDetailsView->SetStructureData(MakeShareable(new FStructOnScope(FHeightPoint::StaticStruct(), (uint8*)&Road->HeightPoints[Index])));
 		StructDetailsView->GetOnFinishedChangingPropertiesDelegate().AddSP(this, &SRoadEdit::OnRoadPointPropertyChanged, Road, Index);
@@ -390,6 +390,13 @@ void SRoadEdit::SetEditMarkingPoint(UMarkingPoint* Marking)
 
 void SRoadEdit::SetEditMarkingCurve(UMarkingCurve* Marking, int Index)
 {
+	if (!IsValid(Marking) || Marking->bUseGeneratedWorldPoints)
+	{
+		SetEditNone();
+		return;
+	}
+	if (Index != INDEX_NONE && !Marking->Points.IsValidIndex(Index))
+		Index = INDEX_NONE;
 	if (Index == INDEX_NONE)
 	{
 		ObjectDetailsView->OnFinishedChangingProperties().Clear();
@@ -471,17 +478,35 @@ void SRoadEdit::OnBoundarySegmentPropertyChanged(const FPropertyChangedEvent& Pr
 
 void SRoadEdit::OnMarkingPointPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, UMarkingPoint* Marking)
 {
-	Marking->GetRoad()->GetScene()->Rebuild();
+	ARoadActor* Road = IsValid(Marking) ? Marking->GetRoad() : nullptr;
+	if (!IsValid(Road))
+		return;
+	TArray<FJunctionSlot> Slots;
+	if (!Road->IsLink())
+	{
+		if (ARoadScene* Scene = Road->GetScene(); IsValid(Scene))
+			Slots = Scene->GetJunctionSlots(Road);
+	}
+	Road->BuildMesh(Slots);
 }
 
 void SRoadEdit::OnMarkingCurvePropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, UMarkingCurve* Marking)
 {
-	Marking->GetRoad()->GetScene()->Rebuild();
+	ARoadActor* Road = IsValid(Marking) ? Marking->GetRoad() : nullptr;
+	if (!IsValid(Road))
+		return;
+	TArray<FJunctionSlot> Slots;
+	if (!Road->IsLink())
+	{
+		if (ARoadScene* Scene = Road->GetScene(); IsValid(Scene))
+			Slots = Scene->GetJunctionSlots(Road);
+	}
+	Road->BuildMesh(Slots);
 }
 
 void SRoadEdit::OnMarkingCurvePointPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, UMarkingCurve* Marking, int Index)
 {
-	Marking->GetRoad()->GetScene()->Rebuild();
+	OnMarkingCurvePropertyChanged(PropertyChangedEvent, Marking);
 }
 
 void SRoadEdit::OnGroundPointPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, AGroundActor* Ground, int Index)

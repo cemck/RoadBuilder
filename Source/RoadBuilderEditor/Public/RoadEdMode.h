@@ -6,6 +6,7 @@
 #include "EditorModeManager.h"
 #include "EdMode.h"
 #include "Misc/NotifyHook.h"
+#include "Containers/Ticker.h"
 #include "RoadActor.h"
 #include "RoadScene.h"
 
@@ -90,6 +91,7 @@ public:
 	FVector LineTrace(FEditorViewportClient* ViewportClient, AActor* IgnoredActor = nullptr) const;
 	void SelectParent();
 	bool HandleClickRoad(HHitProxy* HitProxy, const FViewportClick& Click, int* PointIndex = nullptr);
+	ARoadActor* PickRoadAcrossLoadedScenes(const FVector& Pos, ARoadActor* IgnoredRoad = nullptr) const;
 	bool HandleClickJunction(HHitProxy* HitProxy, const FViewportClick& Click, int* GateIndex = nullptr, int* LinkIndex = nullptr);
 	void DrawCurve(FPrimitiveDrawInterface* PDI, const FPolyline& Curve, FColor Color, float Thickness, float DepthBias = 0);
 	void DrawPoint(FPrimitiveDrawInterface* PDI, URoadCurve* Curve, double Dist, FColor Color);
@@ -97,6 +99,8 @@ public:
 	void DrawRoads(FPrimitiveDrawInterface* PDI, bool DrawLinks);
 	void DrawJunction(FPrimitiveDrawInterface* PDI, AJunctionActor* Junction, FColor Color);
 	void DrawJunctions(FPrimitiveDrawInterface* PDI);
+	static bool IsValidRoadPointSelection(const ARoadActor* Road, int32 PointIndex);
+	static bool IsValidHeightPointSelection(const ARoadActor* Road, int32 PointIndex);
 	bool LazyRebuild = false;
 };
 
@@ -108,7 +112,7 @@ public:
 class FRoadTool_RoadPlan : public FRoadTool
 {
 public:
-	virtual bool ShouldDrawWidget() const { return PointIndex != INDEX_NONE; }
+	virtual bool ShouldDrawWidget() const;
 	virtual FVector GetWidgetLocation() const;
 	virtual EAxisList::Type GetWidgetAxisToDraw() const { return EAxisList::XY; }
 	virtual bool HandleClick(FEditorViewportClient* InViewportClient, HHitProxy* HitProxy, const FViewportClick& Click);
@@ -117,7 +121,10 @@ public:
 	virtual void Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI);
 	virtual void NotifyPreChange(FProperty* PropertyAboutToChange)
 	{
-		GetSelectedRoad()->Modify();
+		if (ARoadActor* Road = GetSelectedRoad(); IsValidRoadPointSelection(Road, PointIndex))
+		{
+			Road->Modify();
+		}
 	}
 	virtual void Reset()
 	{
@@ -131,7 +138,7 @@ public:
 class FRoadTool_RoadHeight : public FRoadTool
 {
 public:
-	virtual bool ShouldDrawWidget() const { return PointIndex != INDEX_NONE; }
+	virtual bool ShouldDrawWidget() const;
 	virtual FVector GetWidgetLocation() const;
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData);
 	virtual EAxisList::Type GetWidgetAxisToDraw() const { return EAxisList::X; }
@@ -141,7 +148,10 @@ public:
 	virtual void Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI);
 	virtual void NotifyPreChange(FProperty* PropertyAboutToChange)
 	{
-		GetSelectedRoad()->Modify();
+		if (ARoadActor* Road = GetSelectedRoad(); IsValidHeightPointSelection(Road, PointIndex))
+		{
+			Road->Modify();
+		}
 	}
 	virtual void Reset()
 	{
@@ -306,17 +316,23 @@ public:
 class FRoadTool_MarkingCurve : public FRoadTool
 {
 public:
-	virtual bool ShouldDrawWidget() const { return CurrentMarking != nullptr; }
+	virtual bool ShouldDrawWidget() const
+	{
+		return IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints &&
+			(PointIndex == INDEX_NONE ? !CurrentMarking->Points.IsEmpty() : CurrentMarking->Points.IsValidIndex(PointIndex));
+	}
 	virtual FVector GetWidgetLocation() const;
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData);
 	virtual EAxisList::Type GetWidgetAxisToDraw() const { return EAxisList::XY; }
 	virtual bool HandleClick(FEditorViewportClient* InViewportClient, HHitProxy* HitProxy, const FViewportClick& Click);
 	virtual bool InputKey(FEditorViewportClient* ViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event);
 	virtual bool InputDelta(FEditorViewportClient* InViewportClient, FViewport* InViewport, FVector& InDrag, FRotator& InRot, FVector& InScale);
+	virtual bool EndModify() override;
 	virtual void Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI);
 	virtual void NotifyPreChange(FProperty* PropertyAboutToChange)
 	{
-		CurrentMarking->Modify();
+		if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints)
+			CurrentMarking->Modify();
 	}
 	virtual void Reset()
 	{
@@ -388,8 +404,10 @@ public:
 	int GetToolIndex();
 	void SetToolIndex(int Index);
 
-	void OnUndo(const FTransactionContext& InTransactionContext, bool bSucceeded);
-	void OnRedo(const FTransactionContext& InTransactionContext, bool bSucceeded);
+	void OnPostUndoRedo();
+	void QueueUndoRedoRebuild();
+	bool RunUndoRedoRebuild(float DeltaTime);
+	void CancelUndoRedoRebuild();
 
 	/** FEdMode: Called when the mode is entered */
 	virtual void Enter() override;
@@ -405,10 +423,13 @@ public:
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData);
 	virtual EAxisList::Type GetWidgetAxisToDraw(UE::Widget::EWidgetMode InWidgetMode) const;
 	virtual bool HandleClick(FEditorViewportClient* InViewportClient, HHitProxy* HitProxy, const FViewportClick& Click);
+	virtual void DrawHUD(FEditorViewportClient* ViewportClient, FViewport* Viewport, const FSceneView* View, FCanvas* Canvas) override;
 	virtual bool IsSelectionAllowed(AActor* InActor, bool bInSelection) const override { return false; }
 
 	ARoadScene* Scene = nullptr;
 	ARoadActor* SelectedRoad = nullptr;
 	AGroundActor* SelectedGround = nullptr;
 	AJunctionActor* SelectedJunction = nullptr;
+	FTSTicker::FDelegateHandle UndoRedoRebuildHandle;
+	bool bUndoRedoRebuildQueued = false;
 };

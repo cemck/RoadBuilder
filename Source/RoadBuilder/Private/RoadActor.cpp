@@ -30,6 +30,43 @@ bool AreRuntimeRoadPointsValid(const TArray<FVector>& WorldPoints)
 	return true;
 }
 
+bool AreChoppedRoadPointsValid(const TArray<FRoadPoint>& Points)
+{
+	if (Points.Num() < 2)
+	{
+		return false;
+	}
+
+	for (int32 Index = 0; Index < Points.Num(); ++Index)
+	{
+		const FVector2D& Position = Points[Index].Pos;
+		if (!FMath::IsFinite(Position.X) || !FMath::IsFinite(Position.Y) ||
+			(Index > 0 && Position.Equals(Points[Index - 1].Pos, UE_DOUBLE_SMALL_NUMBER)))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool AreChoppedHeightPointsValid(const TArray<FHeightPoint>& Points)
+{
+	if (Points.Num() < 2)
+	{
+		return false;
+	}
+
+	for (int32 Index = 0; Index < Points.Num(); ++Index)
+	{
+		if (!FMath::IsFinite(Points[Index].Dist) || !FMath::IsFinite(Points[Index].Height) ||
+			(Index > 0 && Points[Index].Dist <= Points[Index - 1].Dist + UE_DOUBLE_SMALL_NUMBER))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void GetRuntimeRoadPoints(const ARoadActor* Road, TArray<FVector>& OutWorldPoints)
 {
 	OutWorldPoints.Reset();
@@ -357,6 +394,14 @@ FVector2D FConnectInfo::GetPos()
 
 void FConnectInfo::UpdateChild(ARoadActor* Parent)
 {
+	if (!IsValid(Parent) || !IsValid(Child) || Child->RoadPoints.Num() < 2 || Child->HeightPoints.Num() < 2)
+	{
+		return;
+	}
+	if (bPreserveGeometry)
+	{
+		return;
+	}
 	int PointIndex = Index == 0 ? 0 : Child->RoadPoints.Num() - 1;
 	int DirPoint = Index == 0 ? 1 : Child->RoadPoints.Num() - 2;
 	int HeightIndex = Index == 0 ? 0 : Child->HeightPoints.Num() - 1;
@@ -630,6 +675,19 @@ UMarkingCurve* ARoadActor::GetMarkingCurve(UPolygonMarkStyle* FillStyle)
 	return nullptr;
 }
 
+UMarkingCurve* ARoadActor::GetGeneratedMarkingCurve(UPolygonMarkStyle* FillStyle)
+{
+	for (URoadMarking* Marking : Markings)
+	{
+		if (UMarkingCurve* MarkingCurve = Cast<UMarkingCurve>(Marking))
+		{
+			if (MarkingCurve->bUseGeneratedWorldPoints && MarkingCurve->FillStyle == FillStyle)
+				return MarkingCurve;
+		}
+	}
+	return nullptr;
+}
+
 void ARoadActor::DeleteMarking(URoadMarking* Marking)
 {
 	Marking->ConditionalBeginDestroy();
@@ -685,16 +743,17 @@ void ARoadActor::ConnectTo(int& PointIndex, ARoadActor* Parent)
 	URoadBoundary* Boundary = Parent->GetBoundary(UV);
 	if (!Boundary)
 		return;
-	ARoadScene* TrafficScene = Parent->GetScene();
-	const double ParentTrafficSign = TrafficScene
-		? TrafficScene->GetTrafficDirectionSignForSide(Boundary->GetSide())
+	ARoadScene* ParentTrafficScene = Parent->GetScene();
+	ARoadScene* ChildTrafficScene = GetScene();
+	const double ParentTrafficSign = ParentTrafficScene
+		? ParentTrafficScene->GetTrafficDirectionSignForSide(Boundary->GetSide())
 		: (Boundary->GetSide() == RD_LEFT ? -1.0 : 1.0);
 	// RoadBuilder ramp styles keep their driving lanes on the physical right side.
 	// In LHT those lanes travel against increasing spline distance, so both the
 	// parent and child travel vectors must be mapped.  Flipping only ParentDir
 	// rejects the correctly reversed LHT ramp at the original 45-degree check.
-	const double ChildTrafficSign = TrafficScene
-		? TrafficScene->GetTrafficDirectionSignForSide(RD_RIGHT)
+	const double ChildTrafficSign = ChildTrafficScene
+		? ChildTrafficScene->GetTrafficDirectionSignForSide(RD_RIGHT)
 		: 1.0;
 	FVector ParentDir = Parent->GetDir(UV.X) * ParentTrafficSign;
 	FVector Dir = GetDir(PointIndex > 0 ? Length() : 0) * ChildTrafficSign;
@@ -725,15 +784,96 @@ void ARoadActor::ConnectTo(int& PointIndex, ARoadActor* Parent)
 		PointIndex = RoadPoints.Num() - 1;
 }
 
-void ARoadActor::ConnectTo(ARoadActor* Parent, const FVector2D& UV, int Index)
+void ARoadActor::ConnectTo(ARoadActor* Parent, const FVector2D& UV, int Index, bool bPreserveGeometry)
 {
-	AddDirPoint(Index);
+	if (!IsValid(Parent) || (Index != 0 && Index != 1))
+	{
+		return;
+	}
+
+	ARoadScene* ChildScene = GetScene();
+	ARoadScene* ParentScene = Parent->GetScene();
+	if (IsValid(ChildScene) && IsValid(ParentScene) && ChildScene != ParentScene)
+	{
+		AddDirPoint(Index);
+		CrossRoadSceneConnections.RemoveAll([Index](const FCrossRoadSceneConnection& Connection)
+		{
+			return Connection.Index == Index;
+		});
+		FCrossRoadSceneConnection& Connection = CrossRoadSceneConnections.AddDefaulted_GetRef();
+		Connection.Parent = Parent;
+		Connection.Index = Index;
+		Connection.UV = UV;
+		Connection.ParentEndpoint = FMath::IsNearlyZero(UV.X)
+			? 0
+			: (FMath::IsNearlyEqual(UV.X, Parent->Length()) ? 1 : INDEX_NONE);
+
+		FConnectInfo UpdateInfo;
+		UpdateInfo.Child = this;
+		UpdateInfo.Index = Index;
+		UpdateInfo.UV = UV;
+		UpdateInfo.UpdateChild(Parent);
+		return;
+	}
+
+	if (!bPreserveGeometry)
+	{
+		AddDirPoint(Index);
+	}
 	ConnectedParents[Index] = Parent;
 	FConnectInfo& TargetInfo = Parent->ConnectedChildren[Parent->ConnectedChildren.AddDefaulted()];
 	TargetInfo.UV = UV;
 	TargetInfo.Child = this;
 	TargetInfo.Index = Index;
+	TargetInfo.bPreserveGeometry = bPreserveGeometry;
 	TargetInfo.UpdateChild(Parent);
+}
+
+bool ARoadActor::HasCrossRoadSceneConnection(int32 Index) const
+{
+	return CrossRoadSceneConnections.ContainsByPredicate([Index](const FCrossRoadSceneConnection& Connection)
+	{
+		return Connection.Index == Index && !Connection.Parent.IsNull();
+	});
+}
+
+bool ARoadActor::HasCrossRoadSceneParentInScene(const ARoadScene* Scene) const
+{
+	if (!IsValid(Scene))
+	{
+		return false;
+	}
+	return CrossRoadSceneConnections.ContainsByPredicate([Scene](const FCrossRoadSceneConnection& Connection)
+	{
+		ARoadActor* Parent = Connection.Parent.Get();
+		return IsValid(Parent) && Parent->GetScene() == Scene;
+	});
+}
+
+void ARoadActor::RefreshCrossRoadSceneConnections()
+{
+	for (const FCrossRoadSceneConnection& Connection : CrossRoadSceneConnections)
+	{
+		ARoadActor* Parent = Connection.Parent.Get();
+		if (!IsValid(Parent) || (Connection.Index != 0 && Connection.Index != 1))
+		{
+			continue;
+		}
+
+		FConnectInfo UpdateInfo;
+		UpdateInfo.Child = this;
+		UpdateInfo.Index = Connection.Index;
+		UpdateInfo.UV = Connection.UV;
+		if (Connection.ParentEndpoint == 0)
+		{
+			UpdateInfo.UV.X = 0.0;
+		}
+		else if (Connection.ParentEndpoint == 1)
+		{
+			UpdateInfo.UV.X = Parent->Length();
+		}
+		UpdateInfo.UpdateChild(Parent);
+	}
 }
 
 void ARoadActor::DisconnectFrom(ARoadActor* Child, int Index)
@@ -761,11 +901,19 @@ void ARoadActor::DisconnectAll()
 		int PointIndex = ConnectedChildren[0].Index > 0 ? ConnectedChildren[0].Child->RoadPoints.Num() - 1 : 0;
 		ConnectedChildren[0].Child->DisconnectAt(PointIndex);
 	}
+	for (int32 EndpointIndex = 1; EndpointIndex >= 0; --EndpointIndex)
+	{
+		if (HasCrossRoadSceneConnection(EndpointIndex))
+		{
+			DisconnectAt(EndpointIndex == 0 ? 0 : RoadPoints.Num() - 1);
+		}
+	}
 }
 
 void ARoadActor::DisconnectAll(int& PointIndex)
 {
-	if (ConnectedParents[PointIndex > 0])
+	const int32 EndpointIndex = PointIndex > 0 ? 1 : 0;
+	if (ConnectedParents[EndpointIndex] || HasCrossRoadSceneConnection(EndpointIndex))
 	{
 		DisconnectAt(PointIndex);
 		if (PointIndex > 0)
@@ -784,6 +932,20 @@ void ARoadActor::DisconnectAll(int& PointIndex)
 void ARoadActor::DisconnectAt(int PointIndex)
 {
 	int Index = PointIndex ? 1 : 0;
+	const int32 RemovedCrossConnections = CrossRoadSceneConnections.RemoveAll([Index](const FCrossRoadSceneConnection& Connection)
+	{
+		return Connection.Index == Index;
+	});
+	if (RemovedCrossConnections > 0)
+	{
+		DelDirPoint(Index);
+		return;
+	}
+	if (!IsValid(ConnectedParents[Index]))
+	{
+		ConnectedParents[Index] = nullptr;
+		return;
+	}
 	if (ConnectedParents[Index]->ConnectedParents[!Index] != this)
 		DelDirPoint(Index);
 	ConnectedParents[Index]->DisconnectFrom(this, Index);
@@ -871,24 +1033,68 @@ void ARoadActor::CutLanes(double R_Start, double R_End)
 ARoadActor* ARoadActor::Chop(double Dist)
 {
 	ARoadScene* Scene = GetScene();
+	const double EndDist = Length();
+	constexpr double MinChopLength = 1.0; // centimetres
+	if (!IsValid(Scene) || !FMath::IsFinite(Dist) || !FMath::IsFinite(EndDist) ||
+		Dist <= MinChopLength || Dist >= EndDist - MinChopLength)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RoadBuilder Chop rejected for %s: cut %.3f cm is outside the valid interior of a %.3f cm road."),
+			*GetName(), Dist, EndDist);
+		return nullptr;
+	}
+
+	// Validate both halves before creating or modifying actors. A stale curve
+	// must produce a clean no-op, not an invalid duplicate that later rebuilds.
+	TArray<FRoadPoint> FirstRoadPoints = CalcRoadPoints(0.0, Dist);
+	TArray<FHeightPoint> FirstHeightPoints = CalcHeightPoints(0.0, Dist);
+	TArray<FRoadPoint> SecondRoadPoints = CalcRoadPoints(Dist, EndDist);
+	TArray<FHeightPoint> SecondHeightPoints = CalcHeightPoints(Dist, EndDist);
+	if (!AreChoppedRoadPointsValid(FirstRoadPoints) || !AreChoppedHeightPointsValid(FirstHeightPoints) ||
+		!AreChoppedRoadPointsValid(SecondRoadPoints) || !AreChoppedHeightPointsValid(SecondHeightPoints) ||
+		!FirstRoadPoints.Last().Pos.Equals(SecondRoadPoints[0].Pos, 0.1))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RoadBuilder Chop rejected for %s: the derived road or height curve is incomplete at %.3f cm."),
+			*GetName(), Dist);
+		return nullptr;
+	}
+
 	Scene->Modify();
 	Modify();
-	double EndDist = Length();
 	ARoadActor* Road = Scene->DuplicateRoad(this);
-	RoadPoints = CalcRoadPoints(0, Dist);
-	HeightPoints = CalcHeightPoints(0, Dist);
+	if (!IsValid(Road))
+	{
+		UE_LOG(LogTemp, Error, TEXT("RoadBuilder Chop failed to duplicate %s."), *GetName());
+		return nullptr;
+	}
+	Road->Modify();
+	RoadPoints = MoveTemp(FirstRoadPoints);
+	HeightPoints = MoveTemp(FirstHeightPoints);
 	CutLanes(0, Dist);
-	Road->RoadPoints = CalcRoadPoints(Dist, EndDist);
-	Road->HeightPoints = CalcHeightPoints(Dist, EndDist);
+	Road->RoadPoints = MoveTemp(SecondRoadPoints);
+	Road->HeightPoints = MoveTemp(SecondHeightPoints);
 	Road->CutLanes(Dist, EndDist);
-	if (ConnectedParents[1])
-		ConnectedParents[1]->GetConnectedChild(this, 1).Child = Road;
+	if (IsValid(ConnectedParents[1]))
+	{
+		ARoadActor* EndParent = ConnectedParents[1];
+		EndParent->Modify();
+		if (FConnectInfo* ParentLink = EndParent->ConnectedChildren.FindByPredicate([this](const FConnectInfo& Info)
+		{
+			return Info.Child == this && Info.Index == 1;
+		}))
+		{
+			ParentLink->Child = Road;
+		}
+	}
 	for (int i = 0; i < ConnectedChildren.Num();)
 	{
 		FConnectInfo& Info = ConnectedChildren[i];
 		if (Info.UV.X > Dist)
 		{
-			Info.Child->ConnectedParents[Info.Index] = Road;
+			if (IsValid(Info.Child) && (Info.Index == 0 || Info.Index == 1))
+			{
+				Info.Child->Modify();
+				Info.Child->ConnectedParents[Info.Index] = Road;
+			}
 			ConnectedChildren.RemoveAt(i);
 		}
 		else
@@ -905,39 +1111,101 @@ ARoadActor* ARoadActor::Chop(double Dist)
 			i++;
 		}
 	}
+	// DuplicateRoad also duplicates World Partition soft endpoint records. The
+	// first half owns endpoint 0; the second half owns endpoint 1.
+	CrossRoadSceneConnections.RemoveAll([](const FCrossRoadSceneConnection& Connection)
+	{
+		return Connection.Index == 1;
+	});
+	Road->CrossRoadSceneConnections.RemoveAll([](const FCrossRoadSceneConnection& Connection)
+	{
+		return Connection.Index == 0;
+	});
 	UpdateCurve();
 	Road->UpdateCurve();
-	ConnectTo(Road, FVector2D(0, 0), 1);
-	Road->ConnectTo(this, FVector2D(Dist, 0), 0);
+
+	// An ordinary connection adds/moves direction points for junction steering.
+	// A chop seam is topological only and must keep both derived meshes exact.
+	ConnectTo(Road, FVector2D(0.0, 0.0), 1, true);
+	Road->ConnectTo(this, FVector2D(Length(), 0.0), 0, true);
 	return Road;
 }
 
 ARoadActor* ARoadActor::Split(URoadBoundary* Boundary)
 {
 	ARoadScene* Scene = GetScene();
+	if (!IsValid(Scene) || !IsValid(Boundary) || Boundary->GetRoad() != this)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RoadBuilder Split rejected for %s: the selected boundary is not owned by this road."), *GetName());
+		return nullptr;
+	}
+
+	const int Side = Boundary->GetSide();
+	if (!IsValid(Boundary->GetLane(Side)) || Length() <= UE_DOUBLE_SMALL_NUMBER)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RoadBuilder Split rejected for %s: the selected boundary has no lane to detach."), *GetName());
+		return nullptr;
+	}
+
 	Scene->Modify();
 	Modify();
 	ARoadActor* Road = Scene->AddRoad();
-	int Side = Boundary->GetSide();
+	if (!IsValid(Road))
+	{
+		UE_LOG(LogTemp, Error, TEXT("RoadBuilder Split failed to create the detached road for %s."), *GetName());
+		return nullptr;
+	}
+	Road->Modify();
 	USettings_Global* Settings = GetMutableDefault<USettings_Global>();
 	USettings_RoadSplit* SplitSettings = GetMutableDefault<USettings_RoadSplit>();
 	URoadStyle* Style = URoadStyle::Create(Boundary, Side, Boundary, Side, false, false, 0xFFFFFFFF, 0xFFFFFFFF);
 	Road->InitWithStyle(Style);
+	// URoadStyle::Create always places the detached lanes on the new road's
+	// physical right side. A source-left split therefore has to reverse the
+	// copied geometry. Traffic handedness is applied later when interpreting
+	// that physical side; using handedness here mirrors the lane stack twice.
 	if (Side)
 		Road->AddSubRoad(Boundary, Length(), 0, (SplitSettings->CornerRadius + SplitSettings->ShoulderWidth) * 2);
 	else
 		Road->AddSubRoad(Boundary, 0, Length(), (SplitSettings->CornerRadius + SplitSettings->ShoulderWidth) * 2);
+	if (Road->Length() <= UE_DOUBLE_SMALL_NUMBER)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RoadBuilder Split rejected for %s: no valid detached curve could be generated."), *GetName());
+		Scene->DestroyRoad(Road);
+		return nullptr;
+	}
 	Road->RoadPoints = Road->CalcRoadPoints(0, Road->Length());
 	Road->AddPoint(SplitSettings->JunctionSize);
 	Road->AddPoint(Road->Length() - SplitSettings->JunctionSize);
-	Road->HeightPoints = HeightPoints;
+	// AddSubRoad already copied, reversed, and rescaled the height segments.
+	// Copying the source control points here used the source road's distance
+	// domain and could twist a reversed split when its endpoint was reconnected.
+	Road->HeightPoints = Road->CalcHeightPoints(0, Road->Length());
 	for (int i = 0; i < 2; i++)
 	{
-		if (ARoadActor* Parent = ConnectedParents[i])
+		ARoadActor* Parent = ConnectedParents[i];
+		if (!IsValid(Parent))
+		{
+			if (const FCrossRoadSceneConnection* CrossConnection = CrossRoadSceneConnections.FindByPredicate([i](const FCrossRoadSceneConnection& Connection)
+			{
+				return Connection.Index == i;
+			}))
+			{
+				Parent = CrossConnection->Parent.Get();
+			}
+		}
+		if (IsValid(Parent))
 		{
 			Parent->Modify();
-			int Index = (Side ^ i) ? Road->RoadPoints.Num() - 1 : 0;
-			FVector2D UV = Parent->GetUV(Road->RoadPoints[Index].Pos);
+			// Match endpoints in world space instead of assuming a traffic side.
+			// This keeps the Chop seam on the same X/world end after a physical-left
+			// split reverses the detached road, and leaves the opposite end free for
+			// the later merge back into the main road.
+			const FVector2D SourceEndpoint = RoadPoints[i == 0 ? 0 : RoadPoints.Num() - 1].Pos;
+			const double StartDistanceSq = FVector2D::DistSquared(SourceEndpoint, Road->RoadPoints[0].Pos);
+			const double EndDistanceSq = FVector2D::DistSquared(SourceEndpoint, Road->RoadPoints.Last().Pos);
+			const int Index = EndDistanceSq < StartDistanceSq ? Road->RoadPoints.Num() - 1 : 0;
+			const FVector2D UV = Parent->GetUV(Road->RoadPoints[Index].Pos);
 			Road->ConnectTo(Parent, UV, Index > 0);
 		}
 	}
@@ -1422,6 +1690,20 @@ void ARoadActor::InitWithRoads(URoadBoundary* Base, int Side, bool SkipSidewalks
 
 void ARoadActor::UpdateCurve(TSet<ARoadActor*>& UpdatedRoads)
 {
+	RefreshCrossRoadSceneConnections();
+	if (RoadPoints.Num() < 2 || HeightPoints.Num() < 2)
+	{
+		return;
+	}
+	for (int32 PointIndex = 1; PointIndex < RoadPoints.Num(); ++PointIndex)
+	{
+		if (RoadPoints[PointIndex].Pos.ContainsNaN() || RoadPoints[PointIndex - 1].Pos.ContainsNaN() ||
+			RoadPoints[PointIndex].Pos.Equals(RoadPoints[PointIndex - 1].Pos, UE_DOUBLE_SMALL_NUMBER))
+		{
+			return;
+		}
+	}
+
 	double S = 0;
 	double LastSize = 0;
 	double LastLength = Length();
@@ -1573,7 +1855,7 @@ void ARoadActor::UpdateCurve(TSet<ARoadActor*>& UpdatedRoads)
 		FHeightPoint& This = HeightPoints[i];
 		FHeightPoint& Prev = HeightPoints[i - 1];
 		double PrevSize = This.Dist - Prev.Dist;
-		double Dir = (This.Height - Prev.Height) / PrevSize;
+		double Dir = PrevSize > UE_DOUBLE_SMALL_NUMBER ? (This.Height - Prev.Height) / PrevSize : 0.0;
 		if (i < HeightPoints.Num() - 1)
 		{
 			FHeightPoint& Next = HeightPoints[i + 1];
@@ -1609,16 +1891,29 @@ void ARoadActor::UpdateCurve(TSet<ARoadActor*>& UpdatedRoads)
 
 void ARoadActor::UpdateCurveBySegments()
 {
-	if (Length() < SMALL_NUMBER)
+	for (int32 Index = 0; Index < HeightSegments.Num();)
 	{
-		int k = 0;
+		const FHeightSegment& Segment = HeightSegments[Index];
+		if (!FMath::IsFinite(Segment.Dist) || !FMath::IsFinite(Segment.Height) || !FMath::IsFinite(Segment.Dir))
+		{
+			HeightSegments.RemoveAt(Index);
+			continue;
+		}
+		if (Index > 0 && Segment.Dist <= HeightSegments[Index - 1].Dist + UE_DOUBLE_SMALL_NUMBER)
+		{
+			if (FMath::IsNearlyEqual(Segment.Dist, HeightSegments[Index - 1].Dist, UE_DOUBLE_SMALL_NUMBER))
+			{
+				HeightSegments[Index - 1].Height = Segment.Height;
+				HeightSegments[Index - 1].Dir = Segment.Dir;
+			}
+			HeightSegments.RemoveAt(Index);
+			continue;
+		}
+		++Index;
 	}
-	for (int i = 1; i < HeightSegments.Num() - 1;)
+	if (HeightSegments.IsEmpty())
 	{
-		if (FMath::IsNearlyEqual(HeightSegments[i].Dist, HeightSegments[i + 1].Dist))
-			HeightSegments.RemoveAt(i);
-		else
-			i++;
+		HeightSegments.AddDefaulted();
 	}
 	UpdateLanes();
 }
@@ -1712,11 +2007,15 @@ FVector2D ARoadActor::GetPos(double Dist)
 		FRoadSegment& Segment = RoadSegments[GetElementIndex(RoadSegments, Dist)];
 		return Segment.GetPos(Dist - Segment.Dist);
 	}
-	return RoadPoints[0].Pos;
+	return RoadPoints.Num() ? RoadPoints[0].Pos : FVector2D::ZeroVector;
 }
 
 FVector ARoadActor::GetPos(int PointIndex)
 {
+	if (!RoadPoints.IsValidIndex(PointIndex))
+	{
+		return FVector::ZeroVector;
+	}
 	double H = GetHeight(RoadPoints[PointIndex].Dist);
 	return FVector(RoadPoints[PointIndex].Pos, H);
 }
@@ -1760,9 +2059,18 @@ double ARoadActor::GetHeight(double Dist)
 	{
 		int Index = GetPointIndex(HeightSegments, Dist);
 		FHeightSegment& Segment = HeightSegments[Index];
-		return Segment.Get(Dist - Segment.Dist);
+		const double SegmentLength = HeightSegments[Index + 1].Dist - Segment.Dist;
+		if (SegmentLength > UE_DOUBLE_SMALL_NUMBER)
+		{
+			const double Height = Segment.Get(Dist - Segment.Dist);
+			if (FMath::IsFinite(Height))
+			{
+				return Height;
+			}
+		}
+		return FMath::IsFinite(Segment.Height) ? Segment.Height : 0.0;
 	}
-	return HeightSegments[0].Height;
+	return HeightSegments.Num() && FMath::IsFinite(HeightSegments[0].Height) ? HeightSegments[0].Height : 0.0;
 }
 
 ARoadScene* ARoadActor::GetScene()
@@ -1956,7 +2264,7 @@ void ARoadActor::PreEditUndo()
 void ARoadActor::PostEditUndo()
 {
 	AActor::PostEditUndo();
-	if (IsValid(this))
+	if (!GIsTransacting && IsValid(this))
 	{
 		if (IsLink())
 			UpdateCurveBySegments();

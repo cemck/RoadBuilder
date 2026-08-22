@@ -85,6 +85,7 @@ public:
 	void DeletePoint(int Index);
 	void MakeClose();
 	void SetPoints(TArray<FVector2D>& UVs);
+	void SetGeneratedWorldPoints(const TArray<FVector>& InWorldPoints);
 	FPolyline CreatePolyline();
 
 	UPROPERTY(EditAnywhere, Category = Style, meta = (DisallowedClasses = "/Script/RoadBuilder.PolygonMarkStyle"))
@@ -104,4 +105,18 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = Curve)
 	bool bClosedLoop = false;
+
+	/**
+	 * Generated junction markings can cross more than one connector road.  Keep
+	 * those polygons in world space so projecting them into one road's UVs does
+	 * not stretch the fill down the whole connector.
+	 */
+	UPROPERTY()
+	TArray<FVector> GeneratedWorldPoints;
+
+	UPROPERTY()
+	bool bUseGeneratedWorldPoints = false;
+
+	/** Number of mesh triangles emitted by this marking during the last BuildMesh. */
+	int32 LastBuildTriangleCount = 0;
 };

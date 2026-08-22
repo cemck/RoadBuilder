@@ -132,6 +132,16 @@ Physical left side (traffic direction comes from the RoadScene setting):
 - **Delete** key ? remove the selected point
 - **Escape** ? deselect
 
+### Connecting roads from separate RoadScenes
+1. Load both World Partition cells so both RoadScenes and their RoadActors are visible.
+2. In **Road Mode > Settings**, enable **Allow Cross-RoadScene Connections**.
+3. Return to **Road > Plan** and select the first or last control point of the child road.
+4. Drag that endpoint onto the paved surface of the target road. The target may belong to any loaded RoadScene.
+5. Keep the road directions within 45 degrees. Moving within 8 m of a compatible target endpoint enables endpoint snapping.
+6. Release the gizmo, then save both affected external actors.
+
+Cross-RoadScene connections are stored as soft seam references. This keeps World Partition sectors independent instead of creating a hard-reference chain across the full route. When both sectors are loaded, rebuilding the child sector refreshes the seam from its target. Cross-scene seams align road geometry but intentionally do not create a junction actor across sector boundaries; keep complete forks, ramps, and intersections inside one RoadScene.
+
 ### Common issues at this point
 | Problem | Fix |
 |---------|-----|

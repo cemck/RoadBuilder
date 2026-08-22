@@ -73,6 +73,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = Build)
 	uint32 BuildProps : 1;
 
+	UPROPERTY(config, EditAnywhere, Category = Build,
+		meta = (DisplayName = "Allow Cross-RoadScene Connections",
+			ToolTip = "Lets Road Plan snap endpoints to roads in other loaded RoadScenes. Cross-scene seams use soft references so World Partition sectors are not hard-reference chained."))
+	uint32 AllowCrossRoadSceneConnections : 1;
+
 	UPROPERTY(config, EditAnywhere, Category = MassGraph)
 	uint32 BuildMassGraph : 1;
 
@@ -99,6 +104,11 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = Debug)
 	uint32 DisplayGateRadianPoints : 1;
+
+	UPROPERTY(config, EditAnywhere, Category = Debug,
+		meta = (DisplayName = "Display Gore Diagnostics",
+			ToolTip = "Draws gore candidate boundaries, nose/intersection points, and requirement status from the last explicit Apply/Rebuild."))
+	uint32 DisplayGoreDiagnostics : 1;
 };
 
 UCLASS()

@@ -16,6 +16,147 @@
 #include "Framework/Application/SlateApplication.h"
 #endif
 
+namespace
+{
+	struct FPolylineClosestApproach
+	{
+		bool bValid = false;
+		double SourceDist = 0.0;
+		double DestinationDist = 0.0;
+		FVector SourcePosition = FVector::ZeroVector;
+		FVector DestinationPosition = FVector::ZeroVector;
+		double DistanceSquared2D = TNumericLimits<double>::Max();
+	};
+
+	void ClosestPointsOnSegments2D(
+		const FVector2D& SourceStart,
+		const FVector2D& SourceEnd,
+		const FVector2D& DestinationStart,
+		const FVector2D& DestinationEnd,
+		double& OutSourceAlpha,
+		double& OutDestinationAlpha)
+	{
+		const FVector2D SourceDirection = SourceEnd - SourceStart;
+		const FVector2D DestinationDirection = DestinationEnd - DestinationStart;
+		const FVector2D Offset = SourceStart - DestinationStart;
+		const double SourceLengthSquared = SourceDirection.SizeSquared();
+		const double DestinationLengthSquared = DestinationDirection.SizeSquared();
+		const double DestinationProjection = FVector2D::DotProduct(DestinationDirection, Offset);
+
+		if (SourceLengthSquared <= UE_DOUBLE_SMALL_NUMBER && DestinationLengthSquared <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			OutSourceAlpha = 0.0;
+			OutDestinationAlpha = 0.0;
+			return;
+		}
+		if (SourceLengthSquared <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			OutSourceAlpha = 0.0;
+			OutDestinationAlpha = FMath::Clamp(DestinationProjection / DestinationLengthSquared, 0.0, 1.0);
+			return;
+		}
+
+		const double SourceProjection = FVector2D::DotProduct(SourceDirection, Offset);
+		if (DestinationLengthSquared <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			OutDestinationAlpha = 0.0;
+			OutSourceAlpha = FMath::Clamp(-SourceProjection / SourceLengthSquared, 0.0, 1.0);
+			return;
+		}
+
+		const double DirectionDot = FVector2D::DotProduct(SourceDirection, DestinationDirection);
+		const double Denominator = SourceLengthSquared * DestinationLengthSquared - DirectionDot * DirectionDot;
+		OutSourceAlpha = FMath::Abs(Denominator) > UE_DOUBLE_SMALL_NUMBER
+			? FMath::Clamp((DirectionDot * DestinationProjection - SourceProjection * DestinationLengthSquared) / Denominator, 0.0, 1.0)
+			: 0.0;
+		OutDestinationAlpha = (DirectionDot * OutSourceAlpha + DestinationProjection) / DestinationLengthSquared;
+		if (OutDestinationAlpha < 0.0)
+		{
+			OutDestinationAlpha = 0.0;
+			OutSourceAlpha = FMath::Clamp(-SourceProjection / SourceLengthSquared, 0.0, 1.0);
+		}
+		else if (OutDestinationAlpha > 1.0)
+		{
+			OutDestinationAlpha = 1.0;
+			OutSourceAlpha = FMath::Clamp((DirectionDot - SourceProjection) / SourceLengthSquared, 0.0, 1.0);
+		}
+	}
+
+	FPolylineClosestApproach FindClosestApproach(const FPolyline& Source, const FPolyline& Destination)
+	{
+		FPolylineClosestApproach Result;
+		for (int32 SourceIndex = 0; SourceIndex + 1 < Source.Points.Num(); ++SourceIndex)
+		{
+			const FPolyPoint& SourceStart = Source.Points[SourceIndex];
+			const FPolyPoint& SourceEnd = Source.Points[SourceIndex + 1];
+			for (int32 DestinationIndex = 0; DestinationIndex + 1 < Destination.Points.Num(); ++DestinationIndex)
+			{
+				const FPolyPoint& DestinationStart = Destination.Points[DestinationIndex];
+				const FPolyPoint& DestinationEnd = Destination.Points[DestinationIndex + 1];
+				double SourceAlpha = 0.0;
+				double DestinationAlpha = 0.0;
+				ClosestPointsOnSegments2D(
+					FVector2D(SourceStart.Pos),
+					FVector2D(SourceEnd.Pos),
+					FVector2D(DestinationStart.Pos),
+					FVector2D(DestinationEnd.Pos),
+					SourceAlpha,
+					DestinationAlpha);
+				const FVector SourcePosition = FMath::Lerp(SourceStart.Pos, SourceEnd.Pos, SourceAlpha);
+				const FVector DestinationPosition = FMath::Lerp(DestinationStart.Pos, DestinationEnd.Pos, DestinationAlpha);
+				const double DeltaX = SourcePosition.X - DestinationPosition.X;
+				const double DeltaY = SourcePosition.Y - DestinationPosition.Y;
+				const double DistanceSquared2D = DeltaX * DeltaX + DeltaY * DeltaY;
+				if (!Result.bValid || DistanceSquared2D < Result.DistanceSquared2D)
+				{
+					Result.bValid = true;
+					Result.DistanceSquared2D = DistanceSquared2D;
+					Result.SourcePosition = SourcePosition;
+					Result.DestinationPosition = DestinationPosition;
+					Result.SourceDist = FMath::Lerp(SourceStart.Dist, SourceEnd.Dist, SourceAlpha);
+					Result.DestinationDist = FMath::Lerp(DestinationStart.Dist, DestinationEnd.Dist, DestinationAlpha);
+				}
+			}
+		}
+		return Result;
+	}
+
+	void AppendConnectedPolyline(
+		TArray<FVector>& Polygon,
+		const FPolyline& Curve,
+		bool bSkipConnectedEndpoint,
+		bool bSkipFarEndpoint)
+	{
+		if (Curve.Points.IsEmpty())
+			return;
+		const bool bReverse = !Polygon.IsEmpty() &&
+			FVector::DistSquared2D(Polygon.Last(), Curve.Points.Last().Pos) <
+			FVector::DistSquared2D(Polygon.Last(), Curve.Points[0].Pos);
+		for (int32 Step = 0; Step < Curve.Points.Num(); ++Step)
+		{
+			if ((Step == 0 && bSkipConnectedEndpoint) ||
+				(Step == Curve.Points.Num() - 1 && bSkipFarEndpoint))
+				continue;
+			const int32 PointIndex = bReverse ? Curve.Points.Num() - 1 - Step : Step;
+			const FVector& Position = Curve.Points[PointIndex].Pos;
+			if (Polygon.IsEmpty() || !Polygon.Last().Equals(Position, 1.0))
+				Polygon.Add(Position);
+		}
+	}
+
+	double PolygonArea2D(const TArray<FVector>& Polygon)
+	{
+		double TwiceArea = 0.0;
+		for (int32 Index = 0; Index < Polygon.Num(); ++Index)
+		{
+			const FVector& Current = Polygon[Index];
+			const FVector& Next = Polygon[(Index + 1) % Polygon.Num()];
+			TwiceArea += Current.X * Next.Y - Next.X * Current.Y;
+		}
+		return FMath::Abs(TwiceArea) * 0.5;
+	}
+}
+
 void FJunctionLink::CreateRoad(AJunctionActor* Parent)
 {
 	Road = Parent->GetWorld()->SpawnActor<ARoadActor>();
@@ -398,33 +539,47 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 			}
 		}
 	}
-	if (!Link.Road)
+	URoadStyle* Style = URoadStyle::Create(
+		SrcBoundary,
+		SrcSide,
+		DstBoundary,
+		DstSide,
+		SkipSidewalks,
+		true,
+		LeftLaneMarkingMask,
+		RightLaneMarkingMask);
+	// Props on the geometric corner boundary are appropriate for ordinary
+	// intersections, but a ramp merge/diverge corner is the painted gore nose.
+	// Copying the source edge props here wraps curbs and guardrails around the
+	// inside of the fork and prevents the clean road-surface joint.
+	if (bRampGoreCorner)
 	{
-		URoadStyle* Style = URoadStyle::Create(SrcBoundary, SrcSide, DstBoundary, DstSide, SkipSidewalks, true, LeftLaneMarkingMask, RightLaneMarkingMask);
-		// Props on the geometric corner boundary are appropriate for ordinary
-		// intersections, but a ramp merge/diverge corner is the painted gore nose.
-		// Copying the source edge props here wraps curbs and guardrails around the
-		// inside of the fork and prevents the clean road-surface joint.
-		if (bRampGoreCorner)
+		Style->BaseCurveProps = nullptr;
+		for (FRoadLaneStyle& LaneStyle : Style->LeftLanes)
 		{
-			Style->BaseCurveProps = nullptr;
-			for (FRoadLaneStyle& LaneStyle : Style->LeftLanes)
-			{
-				LaneStyle.Props = nullptr;
-			}
-			for (FRoadLaneStyle& LaneStyle : Style->RightLanes)
-			{
-				LaneStyle.Props = nullptr;
-			}
+			LaneStyle.Props = nullptr;
 		}
-		if (Style->NumDrivingLanes() > 0 || Index == CornerIndex)
+		for (FRoadLaneStyle& LaneStyle : Style->RightLanes)
 		{
-			Link.CreateRoad(this);
-			Link.Road->InitWithStyle(Style);
+			LaneStyle.Props = nullptr;
 		}
 	}
+	if (!Link.Road)
+	{
+		if (Style->NumDrivingLanes() <= 0 && Index != CornerIndex)
+			return;
+		Link.CreateRoad(this);
+		// A junction link receives its initial markings from the connected roads,
+		// but later edits on the link are authored overrides and must persist.
+		Link.Road->InitWithStyle(Style);
+	}
 	else
+	{
+		// Preserve lane, boundary, and marking styles on existing junction links.
+		// Reinitializing the style here replaces user overrides with the project
+		// DefaultDashStyle/DefaultSolidStyle every time any marking is edited.
 		Link.Road->ClearSegments();
+	}
 	if (Link.Road && bRampGoreCorner)
 	{
 		// Existing saved junction links keep their generated style between
@@ -580,12 +735,46 @@ void AJunctionActor::Build()
 					Link.Road->BuildMesh(TArray<FJunctionSlot>());
 		}
 	}
+	for (FGoreDiagnostic& Diagnostic : GoreDiagnostics)
+	{
+		if (!Diagnostic.IsReady())
+			continue;
+
+		UMarkingCurve* Marking = Diagnostic.Marking.Get();
+		const int32 MeshTriangleCount = IsValid(Marking) ? Marking->LastBuildTriangleCount : 0;
+		if (MeshTriangleCount <= 0)
+		{
+			Diagnostic.State = EGoreDiagnosticState::Blocked;
+			Diagnostic.Status = FString::Printf(
+				TEXT("BLOCKED %d/%d | polygon passed but chevron style emitted 0 mesh triangles"),
+				Diagnostic.RequirementsMet,
+				FGoreDiagnostic::RequirementCount);
+			continue;
+		}
+
+		++Diagnostic.RequirementsMet;
+		Diagnostic.Status.ReplaceInline(
+			*FString::Printf(TEXT("READY %d/%d"), FGoreDiagnostic::RequirementCount - 1, FGoreDiagnostic::RequirementCount),
+			*FString::Printf(TEXT("READY %d/%d"), FGoreDiagnostic::RequirementCount, FGoreDiagnostic::RequirementCount));
+		Diagnostic.Status += FString::Printf(TEXT(" | %d mesh triangles"), MeshTriangleCount);
+	}
 }
 
 void AJunctionActor::BuildGoreMarkings()
 {
 	DebugCurves.Empty();
-	UPolygonMarkStyle* FillStyle = GetMutableDefault<USettings_Global>()->DefaultGoreMarking.LoadSynchronous();
+	GoreDiagnostics.Empty();
+	USettings_Global* GlobalSettings = GetMutableDefault<USettings_Global>();
+	UPolygonMarkStyle* FillStyle = GlobalSettings->DefaultGoreMarking.LoadSynchronous();
+	auto SetBlocked = [](FGoreDiagnostic& Diagnostic, const FString& Reason)
+	{
+		Diagnostic.State = EGoreDiagnosticState::Blocked;
+		Diagnostic.Status = FString::Printf(
+			TEXT("BLOCKED %d/%d | %s"),
+			Diagnostic.RequirementsMet,
+			FGoreDiagnostic::RequirementCount,
+			*Reason);
+	};
 	// A previous handedness build may have stored the generated polygon on a
 	// different junction link.  Clear only generated gore-fill curves from link
 	// roads before rebuilding so the obsolete stretched polygon cannot survive.
@@ -598,7 +787,7 @@ void AJunctionActor::BuildGoreMarkings()
 			for (int MarkingIndex = ExistingLink.Road->Markings.Num() - 1; MarkingIndex >= 0; --MarkingIndex)
 			{
 				UMarkingCurve* ExistingCurve = Cast<UMarkingCurve>(ExistingLink.Road->Markings[MarkingIndex]);
-				if (ExistingCurve && ExistingCurve->FillStyle == FillStyle)
+				if (ExistingCurve && ExistingCurve->bUseGeneratedWorldPoints && ExistingCurve->FillStyle == FillStyle)
 					ExistingLink.Road->DeleteMarking(ExistingCurve);
 			}
 		}
@@ -608,134 +797,330 @@ void AJunctionActor::BuildGoreMarkings()
 		int j = (i + 1) % Gates.Num();
 		FJunctionGate& Gate = Gates[i];
 		FJunctionGate& Next = Gates[j];
-		if (Gate.IsRampOf(Next) || Next.IsRampOf(Gate))
-			continue;
 		int SrcConn = GetRampConnection(Gate);
 		int DstConn = GetRampConnection(Next);
 		if (SrcConn != INDEX_NONE || DstConn != INDEX_NONE)
 		{
+			// Direct ramp-of pairs are part of the same road-side connection and were
+			// intentionally ignored by the original generator.  They are not failed
+			// gore candidates, so keep them out of the diagnostics as well.
+			if (Gate.IsRampOf(Next) || Next.IsRampOf(Gate))
+				continue;
+
+			FGoreDiagnostic& Diagnostic = GoreDiagnostics.AddDefaulted_GetRef();
+			Diagnostic.GateIndex = i;
+			Diagnostic.NextGateIndex = j;
+			if (IsValid(Gate.Road) && Gate.Road->BaseCurve && IsValid(Next.Road) && Next.Road->BaseCurve)
+			{
+				Diagnostic.LabelLocation =
+					(Gate.Road->BaseCurve->GetPos(Gate.Dist) + Next.Road->BaseCurve->GetPos(Next.Dist)) * 0.5;
+			}
+
+			++Diagnostic.RequirementsMet; // Candidate pair is not filtered.
+			if (!FillStyle)
+			{
+				SetBlocked(Diagnostic, TEXT("Default Gore Marking style is not loaded"));
+				continue;
+			}
+			++Diagnostic.RequirementsMet;
+
 			int k = SrcConn != INDEX_NONE ? SrcConn : DstConn;
-			double Sign = SrcConn != INDEX_NONE ? Gate.Sign : Next.Sign;
 			FJunctionLink& Corner = Gate.Links[1];
 			if (!Corner.Road)
+			{
+				SetBlocked(Diagnostic, TEXT("corner connector road is missing"));
 				continue;
-			TArray<URoadBoundary*> CornerBoundaries = Corner.Road->GetBoundaries(1, { ELaneMarkType::Solid });
-			auto GetSourceLink = [&](double DirectionSign)->FJunctionLink*
-			{
-				return DirectionSign > 0
-					? &Gates[k].Links[(i - k + Gates.Num()) % Gates.Num()]
-					: &Gate.Links[(k - i + Gates.Num()) % Gates.Num()];
-			};
-			auto GetDestinationLink = [&](double DirectionSign)->FJunctionLink*
-			{
-				return DirectionSign > 0
-					? &Gates[k].Links[(j - k + Gates.Num()) % Gates.Num()]
-					: &Next.Links[(k - j + Gates.Num()) % Gates.Num()];
-			};
-			FJunctionLink* SrcLink = GetSourceLink(Sign);
-			FJunctionLink* DstLink = GetDestinationLink(Sign);
-			if (!SrcLink->Road || !DstLink->Road)
-			{
-				FJunctionLink* AlternateSrcLink = GetSourceLink(-Sign);
-				FJunctionLink* AlternateDstLink = GetDestinationLink(-Sign);
-				if (AlternateSrcLink->Road && AlternateDstLink->Road)
-				{
-					Sign = -Sign;
-					SrcLink = AlternateSrcLink;
-					DstLink = AlternateDstLink;
-				}
 			}
-			if (!SrcLink->Road || !DstLink->Road)
+			++Diagnostic.RequirementsMet;
+			TArray<URoadBoundary*> CornerBoundaries = Corner.Road->GetBoundaries(1, { ELaneMarkType::Solid });
+			if (!CornerBoundaries.Num())
+			{
+				SetBlocked(Diagnostic, TEXT("corner connector has no physical-side solid boundary"));
 				continue;
-			TArray<URoadBoundary*> SrcBoundaries = SrcLink->Road->GetBoundaries(Sign > 0 ? 1 : 0, { ELaneMarkType::Solid });
-			TArray<URoadBoundary*> DstBoundaries = DstLink->Road->GetBoundaries(Sign > 0 ? 0 : 1, { ELaneMarkType::Solid });
-			if (CornerBoundaries.Num() && SrcBoundaries.Num() && DstBoundaries.Num())
+			}
+			Diagnostic.CornerBoundary = CornerBoundaries.Last()->Curve;
+			++Diagnostic.RequirementsMet;
+			// A gore is geometric: use whichever generated connector exists between
+			// the ramp connection gate and each side of the adjacent junction edge.
+			// Looking up the unordered gate pair is what makes this identical for RHT
+			// and LHT even though the drivable connector direction is reversed.
+			auto GetLinkBetween = [&](int32 FirstGateIndex, int32 SecondGateIndex)->FJunctionLink*
+			{
+				FJunctionLink& Forward = Gates[FirstGateIndex].Links[
+					(SecondGateIndex - FirstGateIndex + Gates.Num()) % Gates.Num()];
+				if (Forward.Road)
+					return &Forward;
+				FJunctionLink& Reverse = Gates[SecondGateIndex].Links[
+					(FirstGateIndex - SecondGateIndex + Gates.Num()) % Gates.Num()];
+				return Reverse.Road ? &Reverse : nullptr;
+			};
+			FJunctionLink* SrcLink = GetLinkBetween(k, i);
+			FJunctionLink* DstLink = GetLinkBetween(k, j);
+			if (!SrcLink || !DstLink)
+			{
+				const FString Missing = !SrcLink && !DstLink
+					? TEXT("source and destination connector roads are missing")
+					: (!SrcLink ? TEXT("source connector road is missing") : TEXT("destination connector road is missing"));
+				SetBlocked(Diagnostic, Missing);
+				continue;
+			}
+			++Diagnostic.RequirementsMet;
+			auto GetSolidBoundaries = [](ARoadActor* Road)
+			{
+				TArray<URoadBoundary*> Boundaries;
+				for (int32 Side = 0; Side < 2; ++Side)
+				{
+					for (URoadBoundary* Boundary : Road->GetBoundaries(Side, { ELaneMarkType::Solid }))
+						Boundaries.AddUnique(Boundary);
+				}
+				return Boundaries;
+			};
+			TArray<URoadBoundary*> SrcBoundaries = GetSolidBoundaries(SrcLink->Road);
+			TArray<URoadBoundary*> DstBoundaries = GetSolidBoundaries(DstLink->Road);
+			if (!SrcBoundaries.Num() || !DstBoundaries.Num())
+			{
+				const FString Missing = !SrcBoundaries.Num() && !DstBoundaries.Num()
+					? TEXT("source and destination solid boundaries are missing")
+					: (!SrcBoundaries.Num() ? TEXT("source solid boundary is missing") : TEXT("destination solid boundary is missing"));
+				SetBlocked(Diagnostic, Missing);
+				continue;
+			}
+			++Diagnostic.RequirementsMet;
 			{
 				URoadBoundary* CornerBoundary = CornerBoundaries.Last();
-				URoadBoundary* SrcBoundary = SrcBoundaries.Last();
-				URoadBoundary* DstBoundary = DstBoundaries.Last();
 				auto HasUsableCurve = [](const URoadBoundary* Boundary)
 				{
 					return Boundary && Boundary->Curve.Points.Num() >= 2 &&
 						Boundary->Curve.Points[0].Dist < Boundary->Curve.Points.Last().Dist;
 				};
-				if (!HasUsableCurve(CornerBoundary) || !HasUsableCurve(SrcBoundary) || !HasUsableCurve(DstBoundary))
+				URoadBoundary* SrcBoundary = nullptr;
+				URoadBoundary* DstBoundary = nullptr;
+				FPolylineClosestApproach BoundaryApproach;
+				double BestBoundaryScore = TNumericLimits<double>::Max();
+				for (URoadBoundary* SourceCandidate : SrcBoundaries)
+				{
+					if (!HasUsableCurve(SourceCandidate))
+						continue;
+					for (URoadBoundary* DestinationCandidate : DstBoundaries)
+					{
+						if (!HasUsableCurve(DestinationCandidate))
+							continue;
+						const FPolylineClosestApproach Approach = FindClosestApproach(
+							SourceCandidate->Curve,
+							DestinationCandidate->Curve);
+						if (!Approach.bValid)
+							continue;
+						double ConnectionScore = FMath::Sqrt(Approach.DistanceSquared2D) * 10.0;
+						if (HasUsableCurve(CornerBoundary))
+						{
+							const FVector SourceFar = FVector::DistSquared2D(
+								SourceCandidate->Curve.Points[0].Pos,
+								Approach.SourcePosition) > FVector::DistSquared2D(
+								SourceCandidate->Curve.Points.Last().Pos,
+								Approach.SourcePosition)
+								? SourceCandidate->Curve.Points[0].Pos
+								: SourceCandidate->Curve.Points.Last().Pos;
+							const FVector DestinationFar = FVector::DistSquared2D(
+								DestinationCandidate->Curve.Points[0].Pos,
+								Approach.DestinationPosition) > FVector::DistSquared2D(
+								DestinationCandidate->Curve.Points.Last().Pos,
+								Approach.DestinationPosition)
+								? DestinationCandidate->Curve.Points[0].Pos
+								: DestinationCandidate->Curve.Points.Last().Pos;
+							const FVector& CornerStart = CornerBoundary->Curve.Points[0].Pos;
+							const FVector& CornerEnd = CornerBoundary->Curve.Points.Last().Pos;
+							ConnectionScore += FMath::Min(
+								FVector::Dist2D(SourceFar, CornerStart) + FVector::Dist2D(DestinationFar, CornerEnd),
+								FVector::Dist2D(SourceFar, CornerEnd) + FVector::Dist2D(DestinationFar, CornerStart));
+						}
+						if (ConnectionScore < BestBoundaryScore)
+						{
+							BestBoundaryScore = ConnectionScore;
+							SrcBoundary = SourceCandidate;
+							DstBoundary = DestinationCandidate;
+							BoundaryApproach = Approach;
+						}
+					}
+				}
+				if (!SrcBoundary || !DstBoundary)
+				{
+					SetBlocked(Diagnostic, TEXT("connector roads have no usable solid-boundary pair"));
 					continue;
+				}
+				++Diagnostic.RequirementsMet;
+				Diagnostic.SourceBoundary = SrcBoundary->Curve;
+				Diagnostic.DestinationBoundary = DstBoundary->Curve;
 				DebugCurves.Add(SrcBoundary->Curve);
 				DebugCurves.Add(DstBoundary->Curve);
-				double Dist1, Dist2;
-				bool bHasIntersection = SrcBoundary->Curve.SolveIntersection(DstBoundary->Curve, Dist1, Dist2);
-				if (!bHasIntersection)
+
+				double Dist1 = 0.0;
+				double Dist2 = 0.0;
+				const bool bExactIntersection = SrcBoundary->Curve.SolveIntersection(DstBoundary->Curve, Dist1, Dist2);
+				FVector SourceNose = FVector::ZeroVector;
+				FVector DestinationNose = FVector::ZeroVector;
+				double NoseGap = 0.0;
+				double JunctionEdgeWidth = 0.0;
+
+				if (bExactIntersection)
 				{
-					// Preserve the original gore construction below.  Edited lane widths
-					// can make the same two boundaries finish at adjacent endpoints rather
-					// than mathematically cross, so accept only a small shared-nose gap as
-					// the original intersection input.  Do not change the marking owner or
-					// project the polygon onto the corner road; that stretches it down the
-					// entire connector.
-					const bool bNoseAtEnd = Sign > 0;
-					const double SrcLength = SrcBoundary->Curve.Points.Last().Dist;
-					const double DstLength = DstBoundary->Curve.Points.Last().Dist;
-					const FVector Pos1 = bNoseAtEnd ? SrcBoundary->Curve.Points.Last().Pos : SrcBoundary->Curve.Points[0].Pos;
-					const FVector Pos2 = bNoseAtEnd ? DstBoundary->Curve.Points.Last().Pos : DstBoundary->Curve.Points[0].Pos;
-					bHasIntersection = FVector::Dist2D(Pos1, Pos2) <= 400.0;
-					if (bHasIntersection)
-					{
-						const double SrcInset = FMath::Min(100.0, SrcLength * 0.25);
-						const double DstInset = FMath::Min(100.0, DstLength * 0.25);
-						Dist1 = bNoseAtEnd ? SrcLength - SrcInset : SrcInset;
-						Dist2 = bNoseAtEnd ? DstLength - DstInset : DstInset;
-					}
+					SourceNose = SrcBoundary->GetPos(Dist1);
+					DestinationNose = DstBoundary->GetPos(Dist2);
 				}
-				if (bHasIntersection)
+				else
 				{
-					TArray<FVector2D> Points;
-					ARoadActor* MarkingRoad = SrcConn != INDEX_NONE ? DstBoundary->GetRoad() : SrcBoundary->GetRoad();
-					auto AddPoints = [&](const FPolyline& Curve)
+					const FPolylineClosestApproach& Closest = BoundaryApproach;
+					if (!Closest.bValid)
 					{
-						for (int i = 0; i < Curve.Points.Num() - 1; i++)
-						{
-							FVector2D UV = MarkingRoad->GetUV(Curve.Points[i].Pos);
-							if (IsUVValid(UV))
-								Points.Add(UV);
-						}
-					};
-					int NoneIndex = Sign > 0 ? 0 : 1;
-					if (SrcBoundary->Segments.Num() < 2)
+						SetBlocked(Diagnostic, TEXT("could not calculate a closest approach between split boundaries"));
+						continue;
+					}
+
+					Dist1 = Closest.SourceDist;
+					Dist2 = Closest.DestinationDist;
+					SourceNose = Closest.SourcePosition;
+					DestinationNose = Closest.DestinationPosition;
+					NoseGap = FMath::Sqrt(Closest.DistanceSquared2D);
+
+					// The closest approach is valid only when the two boundaries actually
+					// narrow relative to the opposite junction edge.  This is a geometric
+					// requirement, not an arbitrary world-distance allowance.
+					if (HasUsableCurve(CornerBoundary))
 					{
-						SrcBoundary->AddSegment(Dist1);
-						SrcBoundary->Segments[NoneIndex].LaneMarking = SrcConn == INDEX_NONE ? GetMutableDefault<USettings_Global>()->DefaultDashStyle.LoadSynchronous() : nullptr;
+						JunctionEdgeWidth = FVector::Dist2D(
+							CornerBoundary->Curve.Points[0].Pos,
+							CornerBoundary->Curve.Points.Last().Pos);
 					}
 					else
-						SrcBoundary->Segments[1].Dist = Dist1;
-					double Start = Sign > 0 ? SrcBoundary->SegmentStart(!NoneIndex) : SrcBoundary->SegmentEnd(!NoneIndex);
-					double End = Sign > 0 ? SrcBoundary->SegmentEnd(!NoneIndex) : SrcBoundary->SegmentStart(!NoneIndex);
-					FPolyline SrcCurve = SrcBoundary->Curve.SubCurve(Start, End);
-					AddPoints(SrcCurve);
-					AddPoints(CornerBoundary->Curve);
-					if (DstBoundary->Segments.Num() < 2)
 					{
-						DstBoundary->AddSegment(Dist2);
-						DstBoundary->Segments[NoneIndex].LaneMarking = DstConn == INDEX_NONE ? GetMutableDefault<USettings_Global>()->DefaultDashStyle.LoadSynchronous() : nullptr;
+						const FVector SourceFar = FVector::DistSquared2D(
+							SrcBoundary->Curve.Points[0].Pos,
+							Closest.SourcePosition) > FVector::DistSquared2D(
+							SrcBoundary->Curve.Points.Last().Pos,
+							Closest.SourcePosition)
+							? SrcBoundary->Curve.Points[0].Pos
+							: SrcBoundary->Curve.Points.Last().Pos;
+						const FVector DestinationFar = FVector::DistSquared2D(
+							DstBoundary->Curve.Points[0].Pos,
+							Closest.DestinationPosition) > FVector::DistSquared2D(
+							DstBoundary->Curve.Points.Last().Pos,
+							Closest.DestinationPosition)
+							? DstBoundary->Curve.Points[0].Pos
+							: DstBoundary->Curve.Points.Last().Pos;
+						JunctionEdgeWidth = FVector::Dist2D(SourceFar, DestinationFar);
 					}
-					else
-						DstBoundary->Segments[1].Dist = Dist2;
-					Start = Sign > 0 ? DstBoundary->SegmentEnd(!NoneIndex) : DstBoundary->SegmentStart(!NoneIndex);
-					End = Sign > 0 ? DstBoundary->SegmentStart(!NoneIndex) : DstBoundary->SegmentEnd(!NoneIndex);
-					FPolyline DstCurve = DstBoundary->Curve.SubCurve(Start, End);
-					AddPoints(DstCurve);
-					UMarkingCurve* Marking = MarkingRoad->GetMarkingCurve(FillStyle);
-					if (!Marking)
+					if (JunctionEdgeWidth <= UE_DOUBLE_SMALL_NUMBER || NoseGap >= JunctionEdgeWidth)
 					{
-						Marking = MarkingRoad->AddMarkingCurve(true);
-						Marking->FillStyle = FillStyle;
+						SetBlocked(
+							Diagnostic,
+							FString::Printf(
+								TEXT("closest boundary approach %.0f cm does not narrow below junction edge %.0f cm"),
+								NoseGap,
+								JunctionEdgeWidth));
+						continue;
 					}
-					Marking->SetPoints(Points);
-					FVector SrcDir = ((SrcCurve.Points.Last().Pos - SrcCurve.Points[0].Pos).GetSafeNormal() + (SrcCurve.Points[1].Pos - SrcCurve.Points[0].Pos).GetSafeNormal()).GetSafeNormal();
-					FVector DstDir = ((DstCurve.Points[0].Pos - DstCurve.Points.Last().Pos).GetSafeNormal() + (DstCurve.Points[DstCurve.Points.Num() - 2].Pos - DstCurve.Points.Last().Pos).GetSafeNormal()).GetSafeNormal();
-					FVector Dir = (SrcDir + DstDir).GetSafeNormal();
-					Marking->Orientation = FMath::RadiansToDegrees(FMath::Atan2(-Dir.X, Dir.Y));
 				}
+
+				Diagnostic.SourceNose = SourceNose;
+				Diagnostic.DestinationNose = DestinationNose;
+				Diagnostic.bHasNosePair = true;
+				Diagnostic.bHasIntersection = true;
+				Diagnostic.Intersection = (SourceNose + DestinationNose) * 0.5;
+				Diagnostic.LabelLocation = Diagnostic.Intersection;
+				++Diagnostic.RequirementsMet;
+
+				ARoadActor* MarkingRoad = SrcConn != INDEX_NONE ? DstBoundary->GetRoad() : SrcBoundary->GetRoad();
+				if (!MarkingRoad)
+				{
+					SetBlocked(Diagnostic, TEXT("marking owner road is missing"));
+					continue;
+				}
+				auto PrepareBoundary = [&](URoadBoundary* Boundary, double& NoseDist)->double
+				{
+					const double CurveStart = Boundary->Curve.Points[0].Dist;
+					const double CurveEnd = Boundary->Curve.Points.Last().Dist;
+					const double Inset = FMath::Min(1.0, (CurveEnd - CurveStart) * 0.1);
+					NoseDist = FMath::Clamp(NoseDist, CurveStart + Inset, CurveEnd - Inset);
+					const bool bNoseAtEnd = NoseDist > (CurveStart + CurveEnd) * 0.5;
+					if (Boundary->Segments.Num() < 2)
+						Boundary->AddSegment(NoseDist);
+					else
+						Boundary->Segments[1].Dist = NoseDist;
+					// Segmenting at the gore nose is geometric. Do not replace an authored
+					// junction marking with DefaultDashStyle/DefaultSolidStyle here.
+					return bNoseAtEnd ? CurveStart : CurveEnd;
+				};
+
+				const double SrcBaseDist = PrepareBoundary(SrcBoundary, Dist1);
+				const double DstBaseDist = PrepareBoundary(DstBoundary, Dist2);
+				FPolyline SrcCurve = SrcBoundary->Curve.SubCurve(Dist1, SrcBaseDist);
+				FPolyline DstCurve = DstBoundary->Curve.SubCurve(DstBaseDist, Dist2);
+				FPolyline EffectiveCornerCurve = CornerBoundary->Curve;
+				if (!HasUsableCurve(CornerBoundary))
+				{
+					EffectiveCornerCurve.Points.Empty();
+					EffectiveCornerCurve.AddPoint(SrcBoundary->GetPos(SrcBaseDist), 0);
+					EffectiveCornerCurve.AddPoint(DstBoundary->GetPos(DstBaseDist), 0);
+					Diagnostic.CornerBoundary = EffectiveCornerCurve;
+				}
+
+				if (SrcCurve.Points.Num() < 2 || DstCurve.Points.Num() < 2)
+				{
+					SetBlocked(Diagnostic, TEXT("split boundary subcurve is too short to form a gore"));
+					continue;
+				}
+
+				// Construct one connected world-space wedge.  Its single nose is the
+				// closest-approach midpoint, and the opposite/wide end is the junction
+				// boundary selected by the original RoadBuilder topology.
+				TArray<FVector> Polygon;
+				Polygon.Add(Diagnostic.Intersection);
+				AppendConnectedPolyline(Polygon, SrcCurve, true, false);
+				AppendConnectedPolyline(Polygon, EffectiveCornerCurve, true, false);
+				AppendConnectedPolyline(Polygon, DstCurve, true, true);
+				if (Polygon.Num() > 1 && Polygon.Last().Equals(Polygon[0], 1.0))
+					Polygon.Pop();
+
+				Diagnostic.PolygonPointCount = Polygon.Num();
+				if (Polygon.Num() < 3 || PolygonArea2D(Polygon) < 100.0)
+				{
+					SetBlocked(
+						Diagnostic,
+						FString::Printf(TEXT("generated wedge is degenerate (%d points)"), Polygon.Num()));
+					continue;
+				}
+
+				UMarkingCurve* Marking = MarkingRoad->GetGeneratedMarkingCurve(FillStyle);
+				if (!Marking)
+				{
+					Marking = MarkingRoad->AddMarkingCurve(true);
+					Marking->FillStyle = FillStyle;
+				}
+				Marking->SetGeneratedWorldPoints(Polygon);
+				Diagnostic.Marking = Marking;
+				const FVector JunctionEdgeMidpoint =
+					(EffectiveCornerCurve.Points[0].Pos + EffectiveCornerCurve.Points.Last().Pos) * 0.5;
+				FVector Dir = (JunctionEdgeMidpoint - Diagnostic.Intersection).GetSafeNormal2D();
+				if (Dir.IsNearlyZero())
+				{
+					const FVector SrcDir = (SrcCurve.Points.Last().Pos - SrcCurve.Points[0].Pos).GetSafeNormal2D();
+					const FVector DstDir = (DstCurve.Points[0].Pos - DstCurve.Points.Last().Pos).GetSafeNormal2D();
+					Dir = (SrcDir + DstDir).GetSafeNormal2D();
+				}
+				Marking->Orientation = FMath::RadiansToDegrees(FMath::Atan2(-Dir.X, Dir.Y));
+
+				++Diagnostic.RequirementsMet;
+				Diagnostic.State = bExactIntersection
+					? EGoreDiagnosticState::ReadyExactIntersection
+					: EGoreDiagnosticState::ReadyNoseGapFallback;
+				Diagnostic.Status = bExactIntersection
+					? FString::Printf(TEXT("READY %d/%d | exact boundary crossing | %d wedge points"), Diagnostic.RequirementsMet, FGoreDiagnostic::RequirementCount, Polygon.Num())
+					: FString::Printf(
+						TEXT("READY %d/%d | closest-approach nose %.0f cm < junction edge %.0f cm | %d wedge points"),
+						Diagnostic.RequirementsMet,
+						FGoreDiagnostic::RequirementCount,
+						NoseGap,
+						JunctionEdgeWidth,
+						Polygon.Num());
 			}
 		}
 	}
@@ -1481,6 +1866,13 @@ FVector2D ARoadScene::GetRoadUV(ARoadActor* SelectedRoad, const FVector& Pos)
 void ARoadScene::Rebuild()
 {
 	RemoveInvalidReferences();
+	for (ARoadActor* Road : Roads)
+	{
+		if (IsValid(Road) && !Road->CrossRoadSceneConnections.IsEmpty())
+		{
+			Road->UpdateCurve();
+		}
+	}
 	const ERoadTrafficHandedness ResolvedTrafficHandedness = GetResolvedTrafficHandedness();
 	if (!bTrafficHandednessInitialized || LastBuiltTrafficHandedness != ResolvedTrafficHandedness)
 	{

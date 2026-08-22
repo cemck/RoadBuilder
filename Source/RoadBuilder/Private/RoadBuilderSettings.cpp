@@ -27,10 +27,12 @@ USettings_Global::USettings_Global(const FObjectInitializer& ObjectInitializer) 
 	DefaultGoreMarking = TSoftObjectPtr<UPolygonMarkStyle>(FSoftObjectPath(TEXT("/RoadBuilder/MarkStyles/PolygonMark/ChevronRegion.ChevronRegion")));
 	BuildJunctions = 1;
 	BuildProps = 1;
+	AllowCrossRoadSceneConnections = 1;
 	BuildMassGraph = 0;
 	AutoGenerateTrafficControl = 0;
 	AutoGenerateTurnArrows = 0;
 	DisplayGateRadianPoints = 0;
+	DisplayGoreDiagnostics = 1;
 }
 
 USettings_OSM::USettings_OSM(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)

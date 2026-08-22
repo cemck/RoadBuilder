@@ -4,15 +4,20 @@
 #include "RoadEdMode.h"
 #include "EditorViewportClient.h"
 #include "EditorModes.h"
+#include "Editor.h"
 #include "EngineUtils.h"
 #include "SceneView.h"
 #include "Kismet/GameplayStatics.h"
 #include "Editor/TransBuffer.h"
 #include "DynamicMeshBuilder.h"
+#include "CanvasItem.h"
+#include "Engine/Canvas.h"
+#include "Engine/Engine.h"
 #include "ScopedTransaction.h"
 #include "RoadEdModeToolkit.h"
 #include "RoadPreset.h"
 #include "Toolkits/ToolkitManager.h"
+#include "Containers/Ticker.h"
 
 IMPLEMENT_HIT_PROXY(HRoadProxy, HHitProxy);
 IMPLEMENT_HIT_PROXY(HGroundProxy, HHitProxy);
@@ -21,6 +26,24 @@ IMPLEMENT_HIT_PROXY(HRoadCurveProxy, HHitProxy);
 IMPLEMENT_HIT_PROXY(HRoadMarkingProxy, HHitProxy);
 
 #define LOCTEXT_NAMESPACE "RoadBuilder"
+
+namespace
+{
+	void RebuildRoadMarkingMesh(URoadMarking* Marking)
+	{
+		ARoadActor* Road = IsValid(Marking) ? Marking->GetRoad() : nullptr;
+		if (!IsValid(Road))
+			return;
+
+		TArray<FJunctionSlot> Slots;
+		if (!Road->IsLink())
+		{
+			if (ARoadScene* Scene = Road->GetScene(); IsValid(Scene))
+				Slots = Scene->GetJunctionSlots(Road);
+		}
+		Road->BuildMesh(Slots);
+	}
+}
 
 bool FRoadTool::InputKey(FEditorViewportClient* ViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event)
 {
@@ -39,11 +62,39 @@ bool FRoadTool::EndModify()
 {
 	if (LazyRebuild)
 	{
-		if (ARoadScene* RoadScene = GetScene())
-		{
-			RoadScene->Rebuild();
-		}
+		// Clear the request before rebuilding. Undo/redo can end an active
+		// viewport interaction and must not leave a stale rebuild armed.
 		LazyRebuild = false;
+		if (!GIsTransacting)
+		{
+			if (ARoadScene* RoadScene = GetScene(); IsValid(RoadScene))
+			{
+				TSet<ARoadScene*> DependentScenes;
+				if (UWorld* World = RoadScene->GetWorld())
+				{
+					for (TActorIterator<ARoadActor> RoadIt(World); RoadIt; ++RoadIt)
+					{
+						ARoadActor* CandidateRoad = *RoadIt;
+						ARoadScene* CandidateScene = IsValid(CandidateRoad) ? CandidateRoad->GetScene() : nullptr;
+						if (IsValid(CandidateScene) && CandidateScene != RoadScene &&
+							CandidateRoad->HasCrossRoadSceneParentInScene(RoadScene))
+						{
+							CandidateRoad->Modify();
+							DependentScenes.Add(CandidateScene);
+						}
+					}
+				}
+				RoadScene->Rebuild();
+				for (ARoadScene* DependentScene : DependentScenes)
+				{
+					if (IsValid(DependentScene))
+					{
+						DependentScene->Modify();
+						DependentScene->Rebuild();
+					}
+				}
+			}
+		}
 	}
 	return true;
 }
@@ -181,6 +232,15 @@ bool FRoadTool::HandleClickRoad(HHitProxy* HitProxy, const FViewportClick& Click
 		ARoadActor*& SelectedRoad = GetSelectedRoad();
 		if (HRoadProxy* Proxy = HitProxyCast<HRoadProxy>(HitProxy))
 		{
+			if (!IsValid(Proxy->Road))
+			{
+				SelectedRoad = nullptr;
+				if (PointIndex)
+				{
+					*PointIndex = INDEX_NONE;
+				}
+				return false;
+			}
 			SelectedRoad = Proxy->Road;
 			// World Partition levels can contain many independent RoadScenes.
 			// Keep the editor tool scoped to the scene that owns the clicked road.
@@ -203,6 +263,63 @@ bool FRoadTool::HandleClickRoad(HHitProxy* HitProxy, const FViewportClick& Click
 		}*/
 	}
 	return false;
+}
+
+ARoadActor* FRoadTool::PickRoadAcrossLoadedScenes(const FVector& Pos, ARoadActor* IgnoredRoad) const
+{
+	ARoadScene* ActiveScene = GetScene();
+	if (!IsValid(ActiveScene))
+	{
+		return nullptr;
+	}
+
+	const USettings_Global* Settings = GetDefault<USettings_Global>();
+	if (!Settings || !Settings->AllowCrossRoadSceneConnections)
+	{
+		return ActiveScene->PickRoad(Pos, IgnoredRoad);
+	}
+
+	UWorld* World = ActiveScene->GetWorld();
+	ARoadActor* BestRoad = nullptr;
+	double BestDistanceSquared = MAX_dbl;
+	for (TActorIterator<ARoadScene> SceneIt(World); SceneIt; ++SceneIt)
+	{
+		ARoadScene* CandidateScene = *SceneIt;
+		if (!IsValid(CandidateScene))
+		{
+			continue;
+		}
+
+		ARoadActor* CandidateRoad = CandidateScene->PickRoad(Pos, IgnoredRoad);
+		if (!IsValid(CandidateRoad) || !CandidateRoad->BaseCurve)
+		{
+			continue;
+		}
+
+		const FVector2D UV = CandidateRoad->GetUV(Pos);
+		if (!IsUVValid(UV))
+		{
+			continue;
+		}
+		const FVector CandidatePosition(CandidateRoad->GetPos(UV.X), CandidateRoad->GetHeight(UV.X));
+		const double DistanceSquared = FVector::DistSquared(Pos, CandidatePosition);
+		if (DistanceSquared < BestDistanceSquared)
+		{
+			BestDistanceSquared = DistanceSquared;
+			BestRoad = CandidateRoad;
+		}
+	}
+	return BestRoad;
+}
+
+bool FRoadTool::IsValidRoadPointSelection(const ARoadActor* Road, int32 PointIndex)
+{
+	return IsValid(Road) && Road->RoadPoints.IsValidIndex(PointIndex);
+}
+
+bool FRoadTool::IsValidHeightPointSelection(const ARoadActor* Road, int32 PointIndex)
+{
+	return IsValid(Road) && Road->HeightPoints.IsValidIndex(PointIndex);
 }
 
 bool FRoadTool::HandleClickJunction(HHitProxy* HitProxy, const FViewportClick& Click, int* GateIndex, int* LinkIndex)
@@ -423,6 +540,42 @@ void FRoadTool::DrawJunction(FPrimitiveDrawInterface* PDI, AJunctionActor* Junct
 		}
 #endif
 	}
+	if (Settings->DisplayGoreDiagnostics)
+	{
+		PDI->SetHitProxy(nullptr);
+		for (const FGoreDiagnostic& Diagnostic : Junction->GoreDiagnostics)
+		{
+			const FColor StatusColor = Diagnostic.IsReady() ? FColor::Green : FColor::Red;
+
+			if (Diagnostic.SourceBoundary.Points.Num() >= 2)
+				DrawCurve(PDI, Diagnostic.SourceBoundary, FColor::Cyan, Thickness_Road + 1.0f, DepthBias_Select);
+			if (Diagnostic.DestinationBoundary.Points.Num() >= 2)
+				DrawCurve(PDI, Diagnostic.DestinationBoundary, FColor::Magenta, Thickness_Road + 1.0f, DepthBias_Select);
+			if (Diagnostic.CornerBoundary.Points.Num() >= 2)
+				DrawCurve(PDI, Diagnostic.CornerBoundary, FColor(64, 128, 255), Thickness_Road, DepthBias_Select);
+
+			if (Diagnostic.bHasNosePair)
+			{
+				PDI->DrawPoint(Diagnostic.SourceNose, FColor::Cyan, Size_Point + 6.0f, SDPG_Foreground);
+				PDI->DrawPoint(Diagnostic.DestinationNose, FColor::Magenta, Size_Point + 6.0f, SDPG_Foreground);
+				PDI->DrawLine(
+					Diagnostic.SourceNose,
+					Diagnostic.DestinationNose,
+					StatusColor,
+					SDPG_Foreground,
+					Thickness_Road + 1.0f,
+					DepthBias_Select,
+					true);
+			}
+			if (Diagnostic.bHasIntersection)
+				PDI->DrawPoint(Diagnostic.Intersection, StatusColor, Size_Point + 12.0f, SDPG_Foreground);
+
+			const FVector Marker = Diagnostic.LabelLocation + FVector(0, 0, 50);
+			PDI->DrawPoint(Marker, StatusColor, Size_Point + 10.0f, SDPG_Foreground);
+			PDI->DrawLine(Marker - FVector(75, 0, 0), Marker + FVector(75, 0, 0), StatusColor, SDPG_Foreground, Thickness_Road, DepthBias_Select, true);
+			PDI->DrawLine(Marker - FVector(0, 75, 0), Marker + FVector(0, 75, 0), StatusColor, SDPG_Foreground, Thickness_Road, DepthBias_Select, true);
+		}
+	}
 }
 
 void FRoadTool::DrawJunctions(FPrimitiveDrawInterface* PDI)
@@ -453,10 +606,15 @@ void FRoadTool::DrawJunctions(FPrimitiveDrawInterface* PDI)
 	}
 }
 
+bool FRoadTool_RoadPlan::ShouldDrawWidget() const
+{
+	return IsValidRoadPointSelection(GetSelectedRoad(), PointIndex);
+}
+
 FVector FRoadTool_RoadPlan::GetWidgetLocation() const
 {
 	ARoadActor* Road = GetSelectedRoad();
-	if (Road && PointIndex != INDEX_NONE)
+	if (IsValidRoadPointSelection(Road, PointIndex))
 		return Road->GetPos(PointIndex);
 	return FRoadTool::GetWidgetLocation();
 }
@@ -466,7 +624,14 @@ bool FRoadTool_RoadPlan::HandleClick(FEditorViewportClient* InViewportClient, HH
 	ARoadActor*& Road = GetSelectedRoad();
 	if (HandleClickRoad(HitProxy, Click, &PointIndex))
 	{
-		GetEditWidget()->SetEditRoadPoint(Road, PointIndex);
+		if (!IsValidRoadPointSelection(Road, PointIndex))
+		{
+			PointIndex = INDEX_NONE;
+		}
+		if (SRoadEdit* EditWidget = GetEditWidget())
+		{
+			EditWidget->SetEditRoadPoint(Road, PointIndex);
+		}
 		return true;
 	}
 	if (Click.GetKey() == EKeys::LeftMouseButton)
@@ -483,10 +648,22 @@ bool FRoadTool_RoadPlan::HandleClick(FEditorViewportClient* InViewportClient, HH
 		FVector Pos = FMath::RayPlaneIntersection(Ray.Origin, Ray.Direction, FPlane(FVector(0, 0, Data->BaseHeight), FVector::UpVector));
 		if (HRoadProxy* Proxy = HitProxyCast<HRoadProxy>(HitProxy))
 		{
+			if (!IsValid(Proxy->Road))
+			{
+				return false;
+			}
 			Road = Proxy->Road;
+			if (FEdModeRoad* RoadMode = FEdModeRoad::Get())
+			{
+				if (ARoadScene* OwningScene = Road->GetScene())
+				{
+					RoadMode->Scene = OwningScene;
+					Scene = OwningScene;
+				}
+			}
 			FVector2D UV = Road->GetUV(Pos);
 			Road->Modify();
-			Road->AddPoint(UV.X);
+			PointIndex = Road->AddPoint(UV.X);
 		}
 		else
 		{
@@ -505,7 +682,10 @@ bool FRoadTool_RoadPlan::HandleClick(FEditorViewportClient* InViewportClient, HH
 		}
 		Road->UpdateCurve();
 		Scene->Rebuild();
-		GetEditWidget()->SetEditRoadPoint(Road, PointIndex);
+		if (SRoadEdit* EditWidget = GetEditWidget())
+		{
+			EditWidget->SetEditRoadPoint(Road, PointIndex);
+		}
 		return true;
 	}
 	return false;
@@ -522,7 +702,7 @@ bool FRoadTool_RoadPlan::InputKey(FEditorViewportClient* ViewportClient, FViewpo
 			if (ARoadActor* SelectedRoad = GetSelectedRoad())
 			{
 				ARoadScene* Scene = GetScene();
-				if (PointIndex != INDEX_NONE)
+				if (IsValidRoadPointSelection(SelectedRoad, PointIndex))
 				{
 					SelectedRoad->RoadPoints.RemoveAt(PointIndex);
 					PointIndex = INDEX_NONE;
@@ -545,7 +725,7 @@ bool FRoadTool_RoadPlan::InputDelta(FEditorViewportClient* InViewportClient, FVi
 {
 	if (InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 	{
-		if (ARoadActor* SelectedRoad = GetSelectedRoad())
+		if (ARoadActor* SelectedRoad = GetSelectedRoad(); IsValidRoadPointSelection(SelectedRoad, PointIndex))
 		{
 			SelectedRoad->Modify();
 			SelectedRoad->RoadPoints[PointIndex].Pos += (FVector2D&)InDrag;
@@ -553,9 +733,16 @@ bool FRoadTool_RoadPlan::InputDelta(FEditorViewportClient* InViewportClient, FVi
 			{
 				SelectedRoad->DisconnectAll(PointIndex);
 				int HeightIndex = PointIndex ? SelectedRoad->HeightPoints.Num() - 1 : 0;
+				if (!SelectedRoad->HeightPoints.IsValidIndex(HeightIndex))
+				{
+					PointIndex = INDEX_NONE;
+					return false;
+				}
 			//	FVector Pos(SelectedRoad->RoadPoints[PointIndex].Pos, SelectedRoad->HeightPoints[HeightIndex].Height);
 			//	FVector Location = LineTrace(FRay(InViewportClient->GetViewLocation(), (Pos - InViewportClient->GetViewLocation()).GetSafeNormal()));
-				ARoadActor* HoveredRoad = GetScene()->PickRoad(FVector(SelectedRoad->RoadPoints[PointIndex].Pos, SelectedRoad->HeightPoints[HeightIndex].Height), SelectedRoad);
+				ARoadActor* HoveredRoad = PickRoadAcrossLoadedScenes(
+					FVector(SelectedRoad->RoadPoints[PointIndex].Pos, SelectedRoad->HeightPoints[HeightIndex].Height),
+					SelectedRoad);
 				if (HoveredRoad && HoveredRoad != SelectedRoad)
 				{
 				//	SelectedRoad->HeightPoints[HeightIndex].Height = Location.Z;
@@ -583,10 +770,15 @@ void FRoadTool_RoadPlan::Render(const FSceneView* View, FViewport* Viewport, FPr
 	}
 }
 
+bool FRoadTool_RoadHeight::ShouldDrawWidget() const
+{
+	return IsValidHeightPointSelection(GetSelectedRoad(), PointIndex);
+}
+
 FVector FRoadTool_RoadHeight::GetWidgetLocation() const
 {
 	ARoadActor* Road = GetSelectedRoad();
-	if (Road && PointIndex != INDEX_NONE)
+	if (IsValidHeightPointSelection(Road, PointIndex) && Road->BaseCurve)
 		return Road->BaseCurve->GetPos(Road->HeightPoints[PointIndex].Dist);
 	return FRoadTool::GetWidgetLocation();
 }
@@ -594,7 +786,7 @@ FVector FRoadTool_RoadHeight::GetWidgetLocation() const
 bool FRoadTool_RoadHeight::GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData)
 {
 	ARoadActor* Road = GetSelectedRoad();
-	if (Road && PointIndex != INDEX_NONE)
+	if (IsValidHeightPointSelection(Road, PointIndex) && Road->BaseCurve)
 	{
 		InMatrix = FRotationMatrix(Road->BaseCurve->GetDir(Road->HeightPoints[PointIndex].Dist).Rotation());
 		return true;
@@ -607,7 +799,14 @@ bool FRoadTool_RoadHeight::HandleClick(FEditorViewportClient* InViewportClient, 
 	ARoadActor*& SelectedRoad = GetSelectedRoad();
 	if (HandleClickRoad(HitProxy, Click, &PointIndex))
 	{
-		GetEditWidget()->SetEditHeightPoint(SelectedRoad, PointIndex);
+		if (!IsValidHeightPointSelection(SelectedRoad, PointIndex))
+		{
+			PointIndex = INDEX_NONE;
+		}
+		if (SRoadEdit* EditWidget = GetEditWidget())
+		{
+			EditWidget->SetEditHeightPoint(SelectedRoad, PointIndex);
+		}
 		return true;
 	}
 	if (SelectedRoad)
@@ -620,7 +819,10 @@ bool FRoadTool_RoadHeight::HandleClick(FEditorViewportClient* InViewportClient, 
 				const FScopedTransaction Transaction(LOCTEXT("RoadHeight", "RoadHeight"));
 				SelectedRoad->Modify();
 				PointIndex = SelectedRoad->AddHeight(UV.X);
-				GetEditWidget()->SetEditHeightPoint(SelectedRoad, PointIndex);
+				if (SRoadEdit* EditWidget = GetEditWidget())
+				{
+					EditWidget->SetEditHeightPoint(SelectedRoad, PointIndex);
+				}
 				SelectedRoad->UpdateCurve();
 				GetScene()->Rebuild();
 				return true;
@@ -639,7 +841,7 @@ bool FRoadTool_RoadHeight::InputKey(FEditorViewportClient* ViewportClient, FView
 		if (Key == EKeys::Delete)
 		{
 			ARoadActor* SelectedRoad = GetSelectedRoad();
-			if (SelectedRoad && PointIndex != INDEX_NONE)
+			if (IsValidHeightPointSelection(SelectedRoad, PointIndex))
 			{
 				SelectedRoad->HeightPoints.RemoveAt(PointIndex);
 				PointIndex = INDEX_NONE;
@@ -655,7 +857,7 @@ bool FRoadTool_RoadHeight::InputDelta(FEditorViewportClient* InViewportClient, F
 {
 	if (InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 	{
-		if (ARoadActor* SelectedRoad = GetSelectedRoad())
+		if (ARoadActor* SelectedRoad = GetSelectedRoad(); IsValidHeightPointSelection(SelectedRoad, PointIndex))
 		{
 			FMatrix Mat = GLevelEditorModeTools().GetCustomDrawingCoordinateSystem();
 			FVector LocalDrag = Mat.InverseTransformVector(InDrag);
@@ -690,15 +892,46 @@ bool FRoadTool_RoadChop::HandleClick(FEditorViewportClient* InViewportClient, HH
 	{
 		if (Click.GetKey() == EKeys::RightMouseButton)
 		{
-			if (HRoadProxy* Proxy = HitProxyCast<HRoadProxy>(HitProxy))
+			const FVector HitLocation = LineTrace(InViewportClient);
+			HRoadProxy* Proxy = HitProxyCast<HRoadProxy>(HitProxy);
+			ARoadActor* HitRoad = Proxy ? Proxy->Road : nullptr;
+			if (!IsValid(HitRoad) && HitLocation.X != WORLD_MAX)
 			{
-				const FScopedTransaction Transaction(LOCTEXT("RoadChop", "RoadChop"));
-				FVector2D UV = SelectedRoad->GetUV(LineTrace(InViewportClient));
-				if (SelectedRoad == Proxy->Road)
-					SelectedRoad->Chop(UV.X);
+				// The road surface is easier to hit than the thin editor centerline.
+				// Limit this fallback to the selected road so a surface click cannot
+				// accidentally join another actor.
+				const FVector2D SelectedUV = SelectedRoad->GetUV(HitLocation);
+				URoadBoundary* PositiveEdge = SelectedRoad->GetRoadEdge(0);
+				URoadBoundary* NegativeEdge = SelectedRoad->GetRoadEdge(1);
+				if (IsUVValid(SelectedUV) && SelectedUV.X >= 0.0 && SelectedUV.X <= SelectedRoad->Length() &&
+					PositiveEdge && NegativeEdge &&
+					PositiveEdge->GetOffset(SelectedUV.X) >= SelectedUV.Y &&
+					NegativeEdge->GetOffset(SelectedUV.X) <= SelectedUV.Y)
+				{
+					HitRoad = SelectedRoad;
+				}
+			}
+
+			if (IsValid(HitRoad))
+			{
+				FScopedTransaction Transaction(LOCTEXT("RoadChop", "RoadChop"));
+				if (SelectedRoad == HitRoad)
+				{
+					const FVector2D UV = SelectedRoad->GetUV(HitLocation);
+					if (SelectedRoad->Chop(UV.X))
+					{
+						GetScene()->Rebuild();
+					}
+					else
+					{
+						Transaction.Cancel();
+					}
+				}
 				else
-					SelectedRoad->Join(Proxy->Road);
-				GetScene()->Rebuild();
+				{
+					SelectedRoad->Join(HitRoad);
+					GetScene()->Rebuild();
+				}
 				return true;
 			}
 		}
@@ -1444,17 +1677,33 @@ void FRoadTool_MarkingPoint::Render(const FSceneView* View, FViewport* Viewport,
 
 FVector FRoadTool_MarkingCurve::GetWidgetLocation() const
 {
-	if (CurrentMarking)
-		return CurrentMarking->GetRoad()->GetPos(PointIndex != INDEX_NONE ? CurrentMarking->Points[PointIndex].GetUV(SubIndex) : CurrentMarking->Center());
+	if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
+	{
+		ARoadActor* Road = CurrentMarking->GetRoad();
+		if (IsValid(Road))
+		{
+			const FVector2D UV = CurrentMarking->Points.IsValidIndex(PointIndex)
+				? CurrentMarking->Points[PointIndex].GetUV(SubIndex)
+				: CurrentMarking->Center();
+			return Road->GetPos(UV);
+		}
+	}
 	return FRoadTool::GetWidgetLocation();
 }
 
 bool FRoadTool_MarkingCurve::GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData)
 {
-	if (CurrentMarking)
+	if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
 	{
-		InMatrix = FRotationMatrix(CurrentMarking->GetRoad()->GetDir(PointIndex != INDEX_NONE ? CurrentMarking->Points[PointIndex].GetUV(SubIndex).X : CurrentMarking->Center().X).Rotation());
-		return true;
+		ARoadActor* Road = CurrentMarking->GetRoad();
+		if (IsValid(Road))
+		{
+			const double Dist = CurrentMarking->Points.IsValidIndex(PointIndex)
+				? CurrentMarking->Points[PointIndex].GetUV(SubIndex).X
+				: CurrentMarking->Center().X;
+			InMatrix = FRotationMatrix(Road->GetDir(Dist).Rotation());
+			return true;
+		}
 	}
 	return false;
 }
@@ -1466,10 +1715,35 @@ bool FRoadTool_MarkingCurve::HandleClick(FEditorViewportClient* InViewportClient
 	ARoadActor* SelectedRoad = GetSelectedRoad();
 	auto ClickProxy = [&](HRoadMarkingProxy* Proxy)
 	{
-		CurrentMarking = Cast<UMarkingCurve>(Proxy->Marking);
+		UMarkingCurve* ClickedMarking = Proxy ? Cast<UMarkingCurve>(Proxy->Marking) : nullptr;
+		if (!IsValid(ClickedMarking) || ClickedMarking->bUseGeneratedWorldPoints)
+		{
+			Reset();
+			return;
+		}
+		CurrentMarking = ClickedMarking;
 		PointIndex = Proxy->Index;
+		if (PointIndex != INDEX_NONE && !CurrentMarking->Points.IsValidIndex(PointIndex))
+			PointIndex = INDEX_NONE;
 		SubIndex = Proxy->SubId;
-		GetEditWidget()->SetEditMarkingCurve(CurrentMarking, PointIndex);
+		if (SRoadEdit* EditWidget = GetEditWidget())
+			EditWidget->SetEditMarkingCurve(CurrentMarking, PointIndex);
+	};
+	auto RebuildEditedMarking = [&]()
+	{
+		UMarkingCurve* EditedMarking = CurrentMarking;
+		ARoadActor* MarkingRoad = IsValid(EditedMarking) ? EditedMarking->GetRoad() : nullptr;
+		RebuildRoadMarkingMesh(EditedMarking);
+		if (!IsValid(EditedMarking) || !IsValid(MarkingRoad) || !MarkingRoad->Markings.Contains(EditedMarking))
+		{
+			Reset();
+			return;
+		}
+		CurrentMarking = EditedMarking;
+		if (PointIndex != INDEX_NONE && !CurrentMarking->Points.IsValidIndex(PointIndex))
+			PointIndex = INDEX_NONE;
+		if (SRoadEdit* EditWidget = GetEditWidget())
+			EditWidget->SetEditMarkingCurve(CurrentMarking, PointIndex);
 	};
 	if (Click.GetKey() == EKeys::LeftMouseButton)
 	{
@@ -1483,17 +1757,28 @@ bool FRoadTool_MarkingCurve::HandleClick(FEditorViewportClient* InViewportClient
 	{
 		const FScopedTransaction Transaction(LOCTEXT("MarkingCurve", "MarkingCurve"));
 		HRoadMarkingProxy* Proxy = HitProxyCast<HRoadMarkingProxy>(HitProxy);
-		if (CurrentMarking && CurrentMarking->IsEndPoint(PointIndex))
+		bool bMarkingChanged = false;
+		if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && CurrentMarking->IsEndPoint(PointIndex))
 		{
 			if (Proxy)
 			{
 				if (Proxy->Marking == CurrentMarking && Proxy->Index != PointIndex && CurrentMarking->IsEndPoint(Proxy->Index))
+				{
 					CurrentMarking->MakeClose();
+					bMarkingChanged = true;
+				}
 				else
 					ClickProxy(Proxy);
 			}
 			else
-				CurrentMarking->InsertPoint(SelectedRoad->GetUV(LineTrace(InViewportClient)), PointIndex);
+			{
+				ARoadActor* MarkingRoad = CurrentMarking->GetRoad();
+				if (IsValid(MarkingRoad))
+				{
+					CurrentMarking->InsertPoint(MarkingRoad->GetUV(LineTrace(InViewportClient)), PointIndex);
+					bMarkingChanged = true;
+				}
+			}
 		}
 		else if (Proxy)
 			ClickProxy(Proxy);
@@ -1503,8 +1788,10 @@ bool FRoadTool_MarkingCurve::HandleClick(FEditorViewportClient* InViewportClient
 			CurrentMarking = SelectedRoad->AddMarkingCurve();
 			PointIndex = INDEX_NONE;
 			CurrentMarking->InsertPoint(SelectedRoad->GetUV(LineTrace(InViewportClient)), PointIndex);
-			GetEditWidget()->SetEditMarkingCurve(CurrentMarking, PointIndex);
+			bMarkingChanged = true;
 		}
+		if (bMarkingChanged)
+			RebuildEditedMarking();
 		return true;
 	}
 	return false;
@@ -1514,14 +1801,25 @@ bool FRoadTool_MarkingCurve::InputKey(FEditorViewportClient* ViewportClient, FVi
 {
 	if (FRoadTool::InputKey(ViewportClient, Viewport, Key, Event))
 		return true;
-	if (Event == IE_Pressed && CurrentMarking)
+	if (Event == IE_Pressed && IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints)
 	{
 		if (Key == EKeys::Delete)
 		{
-			ARoadActor* SelectedRoad = GetSelectedRoad();
-			SelectedRoad->DeleteMarking(CurrentMarking);
+			ARoadActor* MarkingRoad = CurrentMarking->GetRoad();
+			if (!IsValid(MarkingRoad))
+			{
+				Reset();
+				return true;
+			}
+			MarkingRoad->DeleteMarking(CurrentMarking);
 			CurrentMarking = nullptr;
-			SelectedRoad->GetScene()->Rebuild();
+			TArray<FJunctionSlot> Slots;
+			if (!MarkingRoad->IsLink())
+			{
+				if (ARoadScene* MarkingScene = MarkingRoad->GetScene(); IsValid(MarkingScene))
+					Slots = MarkingScene->GetJunctionSlots(MarkingRoad);
+			}
+			MarkingRoad->BuildMesh(Slots);
 			return true;
 		}
 	}
@@ -1532,12 +1830,12 @@ bool FRoadTool_MarkingCurve::InputDelta(FEditorViewportClient* InViewportClient,
 {
 	if (InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 	{
-		if (CurrentMarking)
+		if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
 		{
 			FMatrix Mat = GLevelEditorModeTools().GetCustomDrawingCoordinateSystem();
 			FVector LocalDrag = Mat.InverseTransformVector(InDrag);
 			CurrentMarking->Modify();
-			if (PointIndex != INDEX_NONE)
+			if (CurrentMarking->Points.IsValidIndex(PointIndex))
 				CurrentMarking->Points[PointIndex].ApplyDelta(SubIndex, (FVector2D&)LocalDrag);
 			else
 			{
@@ -1551,17 +1849,28 @@ bool FRoadTool_MarkingCurve::InputDelta(FEditorViewportClient* InViewportClient,
 	return false;
 }
 
+bool FRoadTool_MarkingCurve::EndModify()
+{
+	if (LazyRebuild)
+	{
+		LazyRebuild = false;
+		if (!GIsTransacting)
+			RebuildRoadMarkingMesh(CurrentMarking);
+	}
+	return true;
+}
+
 void FRoadTool_MarkingCurve::Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI)
 {
 	auto Draw = [&](ARoadActor* Road)
 	{
 		for (URoadMarking* Marking : Road->Markings)
 		{
-			if (UMarkingCurve* MarkingCurve = Cast<UMarkingCurve>(Marking))
+			if (UMarkingCurve* MarkingCurve = Cast<UMarkingCurve>(Marking); IsValid(MarkingCurve))
 			{
-				PDI->SetHitProxy(new HRoadMarkingProxy(Marking, INDEX_NONE));
+				PDI->SetHitProxy(MarkingCurve->bUseGeneratedWorldPoints ? nullptr : new HRoadMarkingProxy(Marking, INDEX_NONE));
 				DrawCurve(PDI, MarkingCurve->CreatePolyline(), CurrentMarking == Marking ? Color_Select : Color_Line, Thickness_Road);
-				if (CurrentMarking == MarkingCurve)
+				if (!MarkingCurve->bUseGeneratedWorldPoints && CurrentMarking == MarkingCurve)
 				{
 					for (int i = 0; i < MarkingCurve->Points.Num(); i++)
 					{
@@ -1725,6 +2034,7 @@ FEdModeRoad::FEdModeRoad()
 
 FEdModeRoad::~FEdModeRoad()
 {
+	CancelUndoRedoRebuild();
 	for (FModeTool* Tool : Tools)
 		delete Tool;
 }
@@ -1756,33 +2066,99 @@ void FEdModeRoad::SetToolIndex(int Index)
 	}
 }
 
-void FEdModeRoad::OnUndo(const FTransactionContext& InTransactionContext, bool bSucceeded)
+void FEdModeRoad::OnPostUndoRedo()
 {
-	if (Scene)
-	{
-		Scene->Rebuild();
-	}
+	// FEditorDelegates::PostUndoRedo runs only after every object and editor
+	// undo client has restored its state. Reset any tool-local pointers now,
+	// then coalesce the expensive scene regeneration onto the next editor tick.
+	PostUndo();
+	QueueUndoRedoRebuild();
 }
 
-void FEdModeRoad::OnRedo(const FTransactionContext& InTransactionContext, bool bSucceeded)
+void FEdModeRoad::QueueUndoRedoRebuild()
 {
-	if (Scene)
+	if (bUndoRedoRebuildQueued)
 	{
-		Scene->Rebuild();
+		return;
 	}
+
+	bUndoRedoRebuildQueued = true;
+	UndoRedoRebuildHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateRaw(this, &FEdModeRoad::RunUndoRedoRebuild));
+}
+
+bool FEdModeRoad::RunUndoRedoRebuild(float DeltaTime)
+{
+	// A nested editor operation can start a transaction before the queued tick.
+	// Keep waiting rather than regenerating from a partially transacted graph.
+	if (GIsTransacting)
+	{
+		return true;
+	}
+
+	bUndoRedoRebuildQueued = false;
+	UndoRedoRebuildHandle.Reset();
+	if (!IsValid(Scene) || !IsValid(Scene->GetWorld()))
+	{
+		return false;
+	}
+
+	Scene->RemoveInvalidReferences();
+
+	// RoadPoints and HeightPoints are authored state. Derived segments and
+	// offset polylines can be restored in a different object order by Unreal,
+	// so reconstruct them once from the final transaction state before links.
+	for (ARoadActor* Road : Scene->Roads)
+	{
+		if (!IsValid(Road) || !Road->BaseCurve || Road->RoadPoints.Num() < 2 || Road->HeightPoints.Num() < 2)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("RoadBuilder skipped undo/redo rebuild for %s because its authored curve is incomplete."),
+				IsValid(Road) ? *Road->GetName() : TEXT("invalid road"));
+			return false;
+		}
+		for (int32 PointIndex = 0; PointIndex < Road->RoadPoints.Num(); ++PointIndex)
+		{
+			const FVector2D& Position = Road->RoadPoints[PointIndex].Pos;
+			if (Position.ContainsNaN() ||
+				(PointIndex > 0 && Position.Equals(Road->RoadPoints[PointIndex - 1].Pos, UE_DOUBLE_SMALL_NUMBER)))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("RoadBuilder skipped undo/redo rebuild for %s because its authored points are invalid."), *Road->GetName());
+				return false;
+			}
+		}
+	}
+
+	TSet<ARoadActor*> UpdatedRoads;
+	for (ARoadActor* Road : Scene->Roads)
+	{
+		if (!UpdatedRoads.Contains(Road))
+		{
+			UpdatedRoads.Add(Road);
+			Road->UpdateCurve(UpdatedRoads);
+		}
+	}
+
+	Scene->Rebuild();
+	SelectedRoad = IsValid(SelectedRoad) ? SelectedRoad : nullptr;
+	SelectedGround = IsValid(SelectedGround) ? SelectedGround : nullptr;
+	SelectedJunction = IsValid(SelectedJunction) ? SelectedJunction : nullptr;
+	return false;
+}
+
+void FEdModeRoad::CancelUndoRedoRebuild()
+{
+	if (UndoRedoRebuildHandle.IsValid())
+	{
+		FTSTicker::RemoveTicker(UndoRedoRebuildHandle);
+		UndoRedoRebuildHandle.Reset();
+	}
+	bUndoRedoRebuildQueued = false;
 }
 
 void FEdModeRoad::Enter()
 {
 	FEdMode::Enter();
-	if (GEditor && GEditor->Trans)
-	{
-		if (UTransBuffer* TransBuffer = Cast<UTransBuffer>(GEditor->Trans))
-		{
-			TransBuffer->OnUndo().AddRaw(this, &FEdModeRoad::OnUndo);
-			TransBuffer->OnRedo().AddRaw(this, &FEdModeRoad::OnRedo);
-		}
-	}
+	FEditorDelegates::PostUndoRedo.AddRaw(this, &FEdModeRoad::OnPostUndoRedo);
 	if (!Toolkit.IsValid())
 	{
 		Toolkit = MakeShareable(new FRoadEdModeToolkit);
@@ -1802,6 +2178,8 @@ void FEdModeRoad::Enter()
 
 void FEdModeRoad::Exit()
 {
+	FEditorDelegates::PostUndoRedo.RemoveAll(this);
+	CancelUndoRedoRebuild();
 	Scene = nullptr;
 	SelectedRoad = nullptr;
 	SelectedGround = nullptr;
@@ -1810,14 +2188,6 @@ void FEdModeRoad::Exit()
 	{
 		FToolkitManager::Get().CloseToolkit(Toolkit.ToSharedRef());
 		Toolkit.Reset();
-	}
-	if (GEditor && GEditor->Trans)
-	{
-		if (UTransBuffer* TransBuffer = Cast<UTransBuffer>(GEditor->Trans))
-		{
-			TransBuffer->OnUndo().RemoveAll(this);
-			TransBuffer->OnRedo().RemoveAll(this);
-		}
 	}
 	FEdMode::Exit();
 }
@@ -1835,6 +2205,7 @@ void FEdModeRoad::PostUndo()
 {
 	if (FRoadTool* RoadTool = static_cast<FRoadTool*>(CurrentTool))
 	{
+		RoadTool->LazyRebuild = false;
 		RoadTool->Reset();
 	}
 }
@@ -1919,5 +2290,89 @@ bool FEdModeRoad::HandleClick(FEditorViewportClient* InViewportClient, HHitProxy
 	}
 #endif
 	return FEdMode::HandleClick(InViewportClient, HitProxy, Click);
+}
+
+void FEdModeRoad::DrawHUD(FEditorViewportClient* ViewportClient, FViewport* Viewport, const FSceneView* View, FCanvas* Canvas)
+{
+	FEdMode::DrawHUD(ViewportClient, Viewport, View, Canvas);
+	const USettings_Global* Settings = GetDefault<USettings_Global>();
+	if (!Settings || !Settings->DisplayGoreDiagnostics || !IsValid(Scene) || !View || !Canvas || !GEngine)
+	{
+		return;
+	}
+
+	TArray<AJunctionActor*> DiagnosticJunctions;
+	if (IsValid(SelectedJunction) && SelectedJunction->GetScene() == Scene)
+	{
+		DiagnosticJunctions.Add(SelectedJunction);
+	}
+	else
+	{
+		for (AJunctionActor* Junction : Scene->Junctions)
+		{
+			if (IsValid(Junction))
+				DiagnosticJunctions.Add(Junction);
+		}
+	}
+
+	int32 CandidateCount = 0;
+	int32 ReadyCount = 0;
+	int32 FallbackCount = 0;
+	for (const AJunctionActor* Junction : DiagnosticJunctions)
+	{
+		CandidateCount += Junction->GoreDiagnostics.Num();
+		for (const FGoreDiagnostic& Diagnostic : Junction->GoreDiagnostics)
+		{
+			ReadyCount += Diagnostic.IsReady() ? 1 : 0;
+			FallbackCount += Diagnostic.State == EGoreDiagnosticState::ReadyNoseGapFallback ? 1 : 0;
+		}
+	}
+
+	const FString Summary = FString::Printf(
+		TEXT("GORE DIAGNOSTICS - last Apply/Rebuild | candidates %d | ready %d | gap-ready %d | blocked %d"),
+		CandidateCount,
+		ReadyCount,
+		FallbackCount,
+		CandidateCount - ReadyCount);
+	FCanvasTextItem SummaryItem(
+		FVector2D(12.0f, 12.0f),
+		FText::FromString(Summary),
+		GEngine->GetSmallFont(),
+		FLinearColor::White);
+	SummaryItem.EnableShadow(FLinearColor::Black);
+	Canvas->DrawItem(SummaryItem);
+
+	FCanvasTextItem LegendItem(
+		FVector2D(12.0f, 30.0f),
+		FText::FromString(TEXT("green = ready (exact crossing or narrowing split) | red = blocked | cyan/magenta = tested boundaries")),
+		GEngine->GetSmallFont(),
+		FLinearColor(0.75f, 0.75f, 0.75f));
+	LegendItem.EnableShadow(FLinearColor::Black);
+	Canvas->DrawItem(LegendItem);
+
+	for (const AJunctionActor* Junction : DiagnosticJunctions)
+	{
+		for (const FGoreDiagnostic& Diagnostic : Junction->GoreDiagnostics)
+		{
+			FVector2D PixelLocation;
+			const FVector WorldLocation = Diagnostic.LabelLocation + FVector(0, 0, 100);
+			if (!View->ScreenToPixel(View->WorldToScreen(WorldLocation), PixelLocation))
+				continue;
+
+			const FLinearColor StatusColor = Diagnostic.IsReady() ? FLinearColor::Green : FLinearColor::Red;
+			const FString Label = FString::Printf(
+				TEXT("GORE G%d-G%d | %s"),
+				Diagnostic.GateIndex,
+				Diagnostic.NextGateIndex,
+				*Diagnostic.Status);
+			FCanvasTextItem TextItem(
+				PixelLocation + FVector2D(8.0f, -8.0f),
+				FText::FromString(Label),
+				GEngine->GetSmallFont(),
+				StatusColor);
+			TextItem.EnableShadow(FLinearColor::Black);
+			Canvas->DrawItem(TextItem);
+		}
+	}
 }
 #undef LOCTEXT_NAMESPACE
