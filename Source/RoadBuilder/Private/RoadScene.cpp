@@ -19,6 +19,139 @@
 
 namespace
 {
+	constexpr double JunctionOverrideDistanceTolerance = 1.0;
+	constexpr double JunctionMarkingNormalizedTolerance = 1.e-6;
+	constexpr double JunctionMarkingDistanceTolerance = 0.01;
+	// Fallback gore wedges are only valid when the split-boundary noses are
+	// close enough to form one physical painted nose.  This restores the
+	// original RoadBuilder limit (400 Unreal units = 400 cm).
+	constexpr double MaxGoreNoseGap = 400.0;
+
+	double NormalizeJunctionLinkDistance(double Distance, double LinkLength)
+	{
+		return LinkLength > UE_DOUBLE_SMALL_NUMBER
+			? FMath::Clamp(Distance / LinkLength, 0.0, 1.0)
+			: 0.0;
+	}
+
+	double DenormalizeJunctionLinkDistance(double NormalizedDistance, double LinkLength)
+	{
+		return FMath::Clamp(NormalizedDistance, 0.0, 1.0) * LinkLength;
+	}
+
+	double NormalizeJunctionLinkOffset(double Offset, double LinkLength)
+	{
+		return LinkLength > UE_DOUBLE_SMALL_NUMBER ? Offset / LinkLength : 0.0;
+	}
+
+	double DenormalizeJunctionLinkOffset(double NormalizedOffset, double LinkLength)
+	{
+		return NormalizedOffset * LinkLength;
+	}
+
+	bool MatchesJunctionLinkOverride(
+		const FJunctionLinkOverride& Override,
+		const FJunctionGate& InputGate,
+		const FJunctionGate& OutputGate,
+		int32 LinkIndex)
+	{
+		return Override.InputRoad == InputGate.Road &&
+			Override.OutputRoad == OutputGate.Road &&
+			Override.LinkIndex == LinkIndex &&
+			FMath::IsNearlyEqual(Override.InputGateInitDist, InputGate.InitDist, JunctionOverrideDistanceTolerance) &&
+			FMath::IsNearlyEqual(Override.OutputGateInitDist, OutputGate.InitDist, JunctionOverrideDistanceTolerance);
+	}
+
+	bool MatchesJunctionLinkOverrideKey(
+		const FJunctionLinkOverride& A,
+		const FJunctionLinkOverride& B)
+	{
+		return A.InputRoad == B.InputRoad &&
+			A.OutputRoad == B.OutputRoad &&
+			A.LinkIndex == B.LinkIndex &&
+			FMath::IsNearlyEqual(A.InputGateInitDist, B.InputGateInitDist, JunctionOverrideDistanceTolerance) &&
+			FMath::IsNearlyEqual(A.OutputGateInitDist, B.OutputGateInitDist, JunctionOverrideDistanceTolerance);
+	}
+
+	void CompactJunctionLinkOverrides(TArray<FJunctionLinkOverride>& Overrides)
+	{
+		Overrides.RemoveAll([](const FJunctionLinkOverride& Override)
+		{
+			return !IsValid(Override.InputRoad) || !IsValid(Override.OutputRoad);
+		});
+
+		// Older serialized junctions can contain the same connector snapshot more
+		// than once. Keep the newest entry so a merge cannot resurrect stale marks.
+		for (int32 Index = Overrides.Num() - 2; Index >= 0; --Index)
+		{
+			bool bHasNewerDuplicate = false;
+			for (int32 LaterIndex = Index + 1; LaterIndex < Overrides.Num(); ++LaterIndex)
+			{
+				if (MatchesJunctionLinkOverrideKey(Overrides[Index], Overrides[LaterIndex]))
+				{
+					bHasNewerDuplicate = true;
+					break;
+				}
+			}
+			if (bHasNewerDuplicate)
+			{
+				Overrides.RemoveAt(Index);
+			}
+		}
+	}
+
+	bool MatchesAuthoredMarkingOverride(
+		const FJunctionAuthoredMarkingOverride& A,
+		const FJunctionAuthoredMarkingOverride& B)
+	{
+		if (A.bIsPointMarking != B.bIsPointMarking)
+		{
+			return false;
+		}
+		if (A.bIsPointMarking)
+		{
+			return A.Point.Mesh == B.Point.Mesh &&
+				FMath::IsNearlyEqual(A.Point.NormalizedDistance, B.Point.NormalizedDistance, JunctionMarkingNormalizedTolerance) &&
+				FMath::IsNearlyEqual(A.Point.LateralOffset, B.Point.LateralOffset, JunctionMarkingDistanceTolerance);
+		}
+
+		if (A.MarkStyle != B.MarkStyle || A.FillStyle != B.FillStyle ||
+			!FMath::IsNearlyEqual(A.Orientation, B.Orientation, JunctionMarkingDistanceTolerance) ||
+			A.bClosedLoop != B.bClosedLoop || A.CurvePoints.Num() != B.CurvePoints.Num())
+		{
+			return false;
+		}
+
+		for (int32 PointIndex = 0; PointIndex < A.CurvePoints.Num(); ++PointIndex)
+		{
+			const FJunctionMarkingCurvePointOverride& AP = A.CurvePoints[PointIndex];
+			const FJunctionMarkingCurvePointOverride& BP = B.CurvePoints[PointIndex];
+			if (!FMath::IsNearlyEqual(AP.NormalizedDistance, BP.NormalizedDistance, JunctionMarkingNormalizedTolerance) ||
+				!FMath::IsNearlyEqual(AP.LateralOffset, BP.LateralOffset, JunctionMarkingDistanceTolerance) ||
+				!FMath::IsNearlyEqual(AP.NormalizedInDistance, BP.NormalizedInDistance, JunctionMarkingNormalizedTolerance) ||
+				!FMath::IsNearlyEqual(AP.InLateralOffset, BP.InLateralOffset, JunctionMarkingDistanceTolerance) ||
+				!FMath::IsNearlyEqual(AP.NormalizedOutDistance, BP.NormalizedOutDistance, JunctionMarkingNormalizedTolerance) ||
+				!FMath::IsNearlyEqual(AP.OutLateralOffset, BP.OutLateralOffset, JunctionMarkingDistanceTolerance))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	void AddUniqueAuthoredMarkingOverride(
+		TArray<FJunctionAuthoredMarkingOverride>& Markings,
+		FJunctionAuthoredMarkingOverride&& Marking)
+	{
+		if (!Markings.ContainsByPredicate([&Marking](const FJunctionAuthoredMarkingOverride& Existing)
+			{
+				return MatchesAuthoredMarkingOverride(Existing, Marking);
+			}))
+		{
+			Markings.Add(MoveTemp(Marking));
+		}
+	}
+
 	struct FPolylineClosestApproach
 	{
 		bool bValid = false;
@@ -164,7 +297,8 @@ void FJunctionLink::CreateRoad(AJunctionActor* Parent)
 		Parent->GetWorld(), ARoadActor::StaticClass(), FTransform::Identity, Parent)) : nullptr;
 	if (Road)
 	{
-		Road->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
+		Road->SetOwningJunction(Parent);
+		RoadBuilderWorldPartition::ParentGeneratedActor(Road, Parent);
 	}
 }
 
@@ -239,6 +373,12 @@ double FJunctionSlot::CrossDist() const
 
 void FJunctionSlot::Combine(FJunctionSlot& Other)
 {
+	// A topology solve can merge two generated junction actors. Preserve the
+	// connector records before clearing the old links and destroying Other.
+	Junction->CaptureLinkOverrides();
+	Other.Junction->CaptureLinkOverrides();
+	Junction->AbsorbLinkOverrides(Other.Junction);
+
 	for (FJunctionGate& Gate : Other.Junction->Gates)
 	{
 		Gate.Clear();
@@ -285,6 +425,297 @@ AJunctionActor::AJunctionActor(const FObjectInitializer& ObjectInitializer) : Su
 #else
 	RootComponent = CreateDefaultSubobject<URoadMeshComponent>(TEXT("RootComponent"));
 #endif
+#if WITH_EDITOR
+	SetLockLocation(true);
+#endif
+}
+
+void AJunctionActor::CaptureLinkOverrides()
+{
+	// Keep records for links that are temporarily absent while a junction is
+	// being re-solved.  They are matched by source gates and restored if that
+	// directed connector comes back during a later rebuild.
+	CompactJunctionLinkOverrides(PersistentLinkOverrides);
+
+	for (int32 GateIndex = 0; GateIndex < Gates.Num(); ++GateIndex)
+	{
+		const FJunctionGate& InputGate = Gates[GateIndex];
+		for (int32 LinkIndex = 0; LinkIndex < InputGate.Links.Num(); ++LinkIndex)
+		{
+			const FJunctionLink& Link = InputGate.Links[LinkIndex];
+			if (!IsValid(Link.Road) || Gates.IsEmpty())
+			{
+				continue;
+			}
+
+			const FJunctionGate& OutputGate = Gates[(GateIndex + LinkIndex) % Gates.Num()];
+			FJunctionLinkOverride Snapshot;
+			Snapshot.InputRoad = InputGate.Road;
+			Snapshot.OutputRoad = OutputGate.Road;
+			Snapshot.InputGateInitDist = InputGate.InitDist;
+			Snapshot.OutputGateInitDist = OutputGate.InitDist;
+			Snapshot.LinkIndex = LinkIndex;
+			Snapshot.Radius = Link.Radius;
+
+			const double LinkLength = FMath::Max(Link.Road->Length(), UE_DOUBLE_SMALL_NUMBER);
+			for (int32 BoundaryIndex = 0; BoundaryIndex < Link.Road->Boundaries.Num(); ++BoundaryIndex)
+			{
+				URoadBoundary* Boundary = Link.Road->Boundaries[BoundaryIndex];
+				if (!IsValid(Boundary))
+				{
+					continue;
+				}
+
+				FJunctionBoundaryOverride& BoundarySnapshot = Snapshot.Boundaries.AddDefaulted_GetRef();
+				BoundarySnapshot.BoundaryIndex = BoundaryIndex;
+				for (const FBoundarySegment& Segment : Boundary->Segments)
+				{
+					const double NormalizedDistance = NormalizeJunctionLinkDistance(Segment.Dist, LinkLength);
+					FJunctionBoundarySegmentOverride* ExistingSegment = BoundarySnapshot.Segments.FindByPredicate(
+						[NormalizedDistance](const FJunctionBoundarySegmentOverride& Candidate)
+						{
+							return FMath::IsNearlyEqual(
+								Candidate.NormalizedDist,
+								NormalizedDistance,
+								JunctionMarkingNormalizedTolerance);
+						});
+					FJunctionBoundarySegmentOverride& SegmentSnapshot = ExistingSegment
+						? *ExistingSegment
+						: BoundarySnapshot.Segments.AddDefaulted_GetRef();
+					SegmentSnapshot.NormalizedDist = NormalizedDistance;
+					SegmentSnapshot.LaneMarking = Segment.LaneMarking;
+					SegmentSnapshot.Props = Segment.Props;
+				}
+			}
+
+			for (URoadMarking* Marking : Link.Road->Markings)
+			{
+				if (!IsValid(Marking))
+				{
+					continue;
+				}
+				if (UMarkingPoint* PointMarking = Cast<UMarkingPoint>(Marking))
+				{
+					FJunctionAuthoredMarkingOverride MarkingSnapshot;
+					MarkingSnapshot.bIsPointMarking = true;
+					MarkingSnapshot.Point.Mesh = PointMarking->Mesh;
+					MarkingSnapshot.Point.NormalizedDistance = NormalizeJunctionLinkDistance(PointMarking->Point.X, LinkLength);
+					MarkingSnapshot.Point.LateralOffset = PointMarking->Point.Y;
+					AddUniqueAuthoredMarkingOverride(Snapshot.AuthoredMarkings, MoveTemp(MarkingSnapshot));
+				}
+				else if (UMarkingCurve* CurveMarking = Cast<UMarkingCurve>(Marking))
+				{
+					if (CurveMarking->bUseGeneratedWorldPoints)
+					{
+						FJunctionGeneratedMarkingOverride& GeneratedSnapshot = Snapshot.GeneratedMarkings.AddDefaulted_GetRef();
+						GeneratedSnapshot.FillStyle = CurveMarking->FillStyle;
+						GeneratedSnapshot.Orientation = CurveMarking->Orientation;
+						continue;
+					}
+
+					FJunctionAuthoredMarkingOverride MarkingSnapshot;
+					MarkingSnapshot.MarkStyle = CurveMarking->MarkStyle;
+					MarkingSnapshot.FillStyle = CurveMarking->FillStyle;
+					MarkingSnapshot.Orientation = CurveMarking->Orientation;
+					MarkingSnapshot.bClosedLoop = CurveMarking->bClosedLoop;
+					for (const FMarkingCurvePoint& Point : CurveMarking->Points)
+					{
+						FJunctionMarkingCurvePointOverride& PointSnapshot = MarkingSnapshot.CurvePoints.AddDefaulted_GetRef();
+						PointSnapshot.NormalizedDistance = NormalizeJunctionLinkDistance(Point.Pos.X, LinkLength);
+						PointSnapshot.LateralOffset = Point.Pos.Y;
+						PointSnapshot.NormalizedInDistance = NormalizeJunctionLinkOffset(Point.In.X, LinkLength);
+						PointSnapshot.InLateralOffset = Point.In.Y;
+						PointSnapshot.NormalizedOutDistance = NormalizeJunctionLinkOffset(Point.Out.X, LinkLength);
+						PointSnapshot.OutLateralOffset = Point.Out.Y;
+					}
+					AddUniqueAuthoredMarkingOverride(Snapshot.AuthoredMarkings, MoveTemp(MarkingSnapshot));
+				}
+			}
+
+			if (FJunctionLinkOverride* Existing = PersistentLinkOverrides.FindByPredicate(
+				[&InputGate, &OutputGate, LinkIndex](const FJunctionLinkOverride& Override)
+				{
+					return MatchesJunctionLinkOverride(Override, InputGate, OutputGate, LinkIndex);
+				}))
+			{
+				*Existing = MoveTemp(Snapshot);
+			}
+			else
+			{
+				PersistentLinkOverrides.Add(MoveTemp(Snapshot));
+			}
+		}
+	}
+}
+
+void AJunctionActor::ApplyLinkOverrides()
+{
+	for (int32 GateIndex = 0; GateIndex < Gates.Num(); ++GateIndex)
+	{
+		const FJunctionGate& InputGate = Gates[GateIndex];
+		for (int32 LinkIndex = 0; LinkIndex < InputGate.Links.Num(); ++LinkIndex)
+		{
+			FJunctionLink& Link = Gates[GateIndex].Links[LinkIndex];
+			if (!IsValid(Link.Road) || Gates.IsEmpty())
+			{
+				continue;
+			}
+
+			const FJunctionGate& OutputGate = Gates[(GateIndex + LinkIndex) % Gates.Num()];
+			const FJunctionLinkOverride* Override = PersistentLinkOverrides.FindByPredicate(
+				[&InputGate, &OutputGate, LinkIndex](const FJunctionLinkOverride& Candidate)
+				{
+					return MatchesJunctionLinkOverride(Candidate, InputGate, OutputGate, LinkIndex);
+				});
+			if (!Override)
+			{
+				continue;
+			}
+
+			const double LinkLength = FMath::Max(Link.Road->Length(), UE_DOUBLE_SMALL_NUMBER);
+			for (const FJunctionBoundaryOverride& BoundaryOverride : Override->Boundaries)
+			{
+				if (!Link.Road->Boundaries.IsValidIndex(BoundaryOverride.BoundaryIndex))
+				{
+					continue;
+				}
+
+				URoadBoundary* Boundary = Link.Road->Boundaries[BoundaryOverride.BoundaryIndex];
+				if (!IsValid(Boundary) || BoundaryOverride.Segments.IsEmpty())
+				{
+					continue;
+				}
+
+				TArray<FBoundarySegment> RestoredSegments;
+				RestoredSegments.Reserve(BoundaryOverride.Segments.Num());
+				for (const FJunctionBoundarySegmentOverride& SegmentOverride : BoundaryOverride.Segments)
+				{
+					FBoundarySegment& Segment = RestoredSegments.AddDefaulted_GetRef();
+					Segment.Dist = DenormalizeJunctionLinkDistance(SegmentOverride.NormalizedDist, LinkLength);
+					Segment.LaneMarking = SegmentOverride.LaneMarking;
+					Segment.Props = SegmentOverride.Props;
+				}
+				RestoredSegments.Sort([](const FBoundarySegment& A, const FBoundarySegment& B)
+				{
+					return A.Dist < B.Dist;
+				});
+				RestoredSegments[0].Dist = 0.0;
+				Boundary->Segments = MoveTemp(RestoredSegments);
+			}
+
+			int32 ExistingAuthoredMarkingCount = 0;
+			for (URoadMarking* Marking : Link.Road->Markings)
+			{
+				if (IsValid(Cast<UMarkingPoint>(Marking)))
+				{
+					++ExistingAuthoredMarkingCount;
+				}
+				else if (const UMarkingCurve* Curve = Cast<UMarkingCurve>(Marking);
+					Curve && !Curve->bUseGeneratedWorldPoints)
+				{
+					++ExistingAuthoredMarkingCount;
+				}
+			}
+
+			// Existing connector actors retain their UObjects.  Recreate authored
+			// markings only after the connector itself was replaced (or if its
+			// marking count no longer matches the saved authored state).
+			if (ExistingAuthoredMarkingCount != Override->AuthoredMarkings.Num())
+			{
+				for (int32 MarkingIndex = Link.Road->Markings.Num() - 1; MarkingIndex >= 0; --MarkingIndex)
+				{
+					URoadMarking* Marking = Link.Road->Markings[MarkingIndex];
+					bool bIsAuthoredMarking = IsValid(Cast<UMarkingPoint>(Marking));
+					if (const UMarkingCurve* Curve = Cast<UMarkingCurve>(Marking))
+					{
+						bIsAuthoredMarking |= !Curve->bUseGeneratedWorldPoints;
+					}
+					if (bIsAuthoredMarking)
+					{
+						Link.Road->DeleteMarking(Marking);
+					}
+				}
+
+				for (const FJunctionAuthoredMarkingOverride& MarkingOverride : Override->AuthoredMarkings)
+				{
+					if (MarkingOverride.bIsPointMarking)
+					{
+						UMarkingPoint* Point = Link.Road->AddMarkingPoint(FVector2D(
+							DenormalizeJunctionLinkDistance(MarkingOverride.Point.NormalizedDistance, LinkLength),
+							MarkingOverride.Point.LateralOffset));
+						Point->Mesh = MarkingOverride.Point.Mesh;
+						continue;
+					}
+
+					UMarkingCurve* Curve = Link.Road->AddMarkingCurve(MarkingOverride.bClosedLoop);
+					Curve->MarkStyle = MarkingOverride.MarkStyle;
+					Curve->FillStyle = MarkingOverride.FillStyle;
+					Curve->Orientation = MarkingOverride.Orientation;
+					for (const FJunctionMarkingCurvePointOverride& PointOverride : MarkingOverride.CurvePoints)
+					{
+						FMarkingCurvePoint& Point = Curve->Points.AddDefaulted_GetRef();
+						Point.Pos = FVector2D(
+							DenormalizeJunctionLinkDistance(PointOverride.NormalizedDistance, LinkLength),
+							PointOverride.LateralOffset);
+						Point.In = FVector2D(
+							DenormalizeJunctionLinkOffset(PointOverride.NormalizedInDistance, LinkLength),
+							PointOverride.InLateralOffset);
+						Point.Out = FVector2D(
+							DenormalizeJunctionLinkOffset(PointOverride.NormalizedOutDistance, LinkLength),
+							PointOverride.OutLateralOffset);
+					}
+				}
+			}
+
+			int32 GeneratedMarkingIndex = 0;
+			for (URoadMarking* Marking : Link.Road->Markings)
+			{
+				UMarkingCurve* Curve = Cast<UMarkingCurve>(Marking);
+				if (!Curve || !Curve->bUseGeneratedWorldPoints ||
+					!Override->GeneratedMarkings.IsValidIndex(GeneratedMarkingIndex))
+				{
+					continue;
+				}
+
+				const FJunctionGeneratedMarkingOverride& GeneratedOverride =
+					Override->GeneratedMarkings[GeneratedMarkingIndex++];
+				Curve->FillStyle = GeneratedOverride.FillStyle;
+				Curve->Orientation = GeneratedOverride.Orientation;
+			}
+		}
+	}
+}
+
+void AJunctionActor::AbsorbLinkOverrides(const AJunctionActor* Other)
+{
+	if (!IsValid(Other))
+	{
+		return;
+	}
+
+	CompactJunctionLinkOverrides(PersistentLinkOverrides);
+	for (const FJunctionLinkOverride& Override : Other->PersistentLinkOverrides)
+	{
+		if (!IsValid(Override.InputRoad) || !IsValid(Override.OutputRoad))
+		{
+			continue;
+		}
+
+		const bool bAlreadyPresent = PersistentLinkOverrides.ContainsByPredicate(
+			[&Override](const FJunctionLinkOverride& Existing)
+			{
+				return Existing.InputRoad == Override.InputRoad &&
+					Existing.OutputRoad == Override.OutputRoad &&
+					Existing.LinkIndex == Override.LinkIndex &&
+					FMath::IsNearlyEqual(Existing.InputGateInitDist, Override.InputGateInitDist, JunctionOverrideDistanceTolerance) &&
+					FMath::IsNearlyEqual(Existing.OutputGateInitDist, Override.OutputGateInitDist, JunctionOverrideDistanceTolerance);
+			});
+		if (!bAlreadyPresent)
+		{
+			PersistentLinkOverrides.Add(Override);
+		}
+	}
+	CompactJunctionLinkOverrides(PersistentLinkOverrides);
 }
 
 void AJunctionActor::AddRoad(ARoadActor* Road, double Dist)
@@ -320,6 +751,21 @@ void AJunctionActor::AddRoad(ARoadActor* Road, double Dist)
 
 void AJunctionActor::Update(TOctree2<FRoadOctreeElement, FRoadOctreeSemantics>& Octree)
 {
+	if (Gates.Num() < 3)
+	{
+		return;
+	}
+	for (const FJunctionGate& Gate : Gates)
+	{
+		FString FailureReason;
+		if (!IsValid(Gate.Road) || !Gate.Road->HasSafeDerivedGeometry(&FailureReason) ||
+			!FMath::IsFinite(Gate.InitDist) || !FMath::IsFinite(Gate.Dist) || !FMath::IsFinite(Gate.Sign))
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected junction solve for %s because a gate is unsafe: %s."), *GetName(),
+				FailureReason.IsEmpty() ? TEXT("the gate road or distance is invalid") : *FailureReason);
+			return;
+		}
+	}
 	FVector Center(0, 0, 0);
 	ARoadScene* Scene = GetScene();
 	for (int i = 0; i < Gates.Num();)
@@ -474,6 +920,16 @@ void AJunctionActor::Update(TOctree2<FRoadOctreeElement, FRoadOctreeSemantics>& 
 
 void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Index)
 {
+	FString FailureReason;
+	if (!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason) ||
+		!Gate.Links.IsValidIndex(Index) || !IsValid(Gate.Road) || !IsValid(Next.Road) ||
+		!Gate.Road->HasSafeDerivedGeometry(&FailureReason) || !Next.Road->HasSafeDerivedGeometry(&FailureReason) ||
+		!FMath::IsFinite(Gate.Dist) || !FMath::IsFinite(Next.Dist))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected junction-link generation for %s: %s."), *GetName(),
+			FailureReason.IsEmpty() ? TEXT("the link index, source, target, or distance is invalid") : *FailureReason);
+		return;
+	}
 	// Corner borders are geometric and must not flip with traffic handedness.
 	// Driving links, however, must select the inbound and outbound traffic sides.
 	const int GeometrySrcSide = Gate.Sign > 0 ? RD_LEFT : RD_RIGHT;
@@ -498,6 +954,16 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 	FJunctionLink& Link = Gate.Links[Index];
 	Link.InputRoad = Gate.Road;
 	Link.OutputRoad = Next.Road;
+	if (const FJunctionLinkOverride* Override = PersistentLinkOverrides.FindByPredicate(
+		[&Gate, &Next, Index](const FJunctionLinkOverride& Candidate)
+		{
+			return MatchesJunctionLinkOverride(Candidate, Gate, Next, Index);
+		}))
+	{
+		// Radius is consumed while constructing the new connector geometry, so
+		// restore it before any arcs are generated.
+		Link.Radius = Override->Radius;
+	}
 	TArray<ELaneType> DrivingLaneTypes = { ELaneType::Driving, ELaneType::Shoulder };
 	if (Index == CornerIndex)
 	{
@@ -574,6 +1040,11 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 		if (Style->NumDrivingLanes() <= 0 && Index != CornerIndex)
 			return;
 		Link.CreateRoad(this);
+		if (!IsValid(Link.Road))
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected junction-link generation for %s because its generated road actor could not be created."), *GetName());
+			return;
+		}
 		// A junction link receives its initial markings from the connected roads,
 		// but later edits on the link are authored overrides and must persist.
 		Link.Road->InitWithStyle(Style);
@@ -616,6 +1087,30 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 
 void AJunctionActor::Build(bool bRegenerateDerivedMarkings)
 {
+	RoadBuilderWorldPartition::PrepareGeneratedGeometryActor(this);
+	FString FailureReason;
+	if (!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected junction rebuild for %s: %s."), *GetName(), *FailureReason);
+		return;
+	}
+	if (Gates.Num() < 3)
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected junction rebuild for %s because it has fewer than three valid gates."), *GetName());
+		return;
+	}
+	for (const FJunctionGate& Gate : Gates)
+	{
+		if (!IsValid(Gate.Road) || !Gate.Road->HasSafeDerivedGeometry(&FailureReason) ||
+			!FMath::IsFinite(Gate.Dist) || !FMath::IsFinite(Gate.InitDist) || !FMath::IsFinite(Gate.Sign))
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected junction rebuild for %s because a gate is unsafe: %s."), *GetName(),
+				FailureReason.IsEmpty() ? TEXT("the gate road or distance is invalid") : *FailureReason);
+			return;
+		}
+	}
+	LastBuildTriangleCount = 0;
+	CaptureLinkOverrides();
 	for (int i = 0; i < Gates.Num(); i++)
 	{
 		FJunctionGate& Gate = Gates[i];
@@ -694,6 +1189,10 @@ void AJunctionActor::Build(bool bRegenerateDerivedMarkings)
 	{
 		BuildGoreMarkings();
 	}
+	// Link generation may replace an actor when a road/junction edit changes
+	// topology. Reapply the saved authored state before mesh/prop instances are
+	// built, while generated gore polygons retain their fresh geometry.
+	ApplyLinkOverrides();
 	FRoadMesh Builder;
 	TArray<FVector> Points;
 	TArray<FVector> CornerPoints;
@@ -701,7 +1200,8 @@ void AJunctionActor::Build(bool bRegenerateDerivedMarkings)
 	for (int i = 0; i < Gates.Num(); i++)
 	{
 		FJunctionGate& Gate = Gates[i];
-		if (Gate.Links[1].Road)
+		if (Gate.Links.IsValidIndex(1) && IsValid(Gate.Links[1].Road) && IsValid(Gate.Links[1].Road->BaseCurve) &&
+			Gate.Links[1].Road->BaseCurve->Curve.Points.Num() >= 2)
 		{
 			FPolyline& Corner = Gate.Links[1].Road->BaseCurve->Curve;
 			for (FPolyPoint& Point : Corner.Points)
@@ -722,6 +1222,7 @@ void AJunctionActor::Build(bool bRegenerateDerivedMarkings)
 		Shapes.ValueSort([](int A, int B)->bool {return A > B; });
 		ULaneShape* Shape = TMap<ULaneShape*, int>::TIterator(Shapes)->Key;
 		Builder.AddPolygon(Shape->GetSurfaceMaterial(), Shape->GetBackfaceMaterial(), Points);
+		LastBuildTriangleCount = Builder.GetTriangleCount();
 		Builder.Build(GetRootComponent());
 		//Markings depend on junction Mesh so build later
 		for (FJunctionGate& Gate : Gates)
@@ -783,7 +1284,7 @@ void AJunctionActor::BuildGoreMarkings()
 			for (int MarkingIndex = ExistingLink.Road->Markings.Num() - 1; MarkingIndex >= 0; --MarkingIndex)
 			{
 				UMarkingCurve* ExistingCurve = Cast<UMarkingCurve>(ExistingLink.Road->Markings[MarkingIndex]);
-				if (ExistingCurve && ExistingCurve->bUseGeneratedWorldPoints && ExistingCurve->FillStyle == FillStyle)
+				if (ExistingCurve && ExistingCurve->bUseGeneratedWorldPoints)
 					ExistingLink.Road->DeleteMarking(ExistingCurve);
 			}
 		}
@@ -955,7 +1456,6 @@ void AJunctionActor::BuildGoreMarkings()
 				FVector SourceNose = FVector::ZeroVector;
 				FVector DestinationNose = FVector::ZeroVector;
 				double NoseGap = 0.0;
-				double JunctionEdgeWidth = 0.0;
 
 				if (bExactIntersection)
 				{
@@ -977,41 +1477,14 @@ void AJunctionActor::BuildGoreMarkings()
 					DestinationNose = Closest.DestinationPosition;
 					NoseGap = FMath::Sqrt(Closest.DistanceSquared2D);
 
-					// The closest approach is valid only when the two boundaries actually
-					// narrow relative to the opposite junction edge.  This is a geometric
-					// requirement, not an arbitrary world-distance allowance.
-					if (HasUsableCurve(CornerBoundary))
-					{
-						JunctionEdgeWidth = FVector::Dist2D(
-							CornerBoundary->Curve.Points[0].Pos,
-							CornerBoundary->Curve.Points.Last().Pos);
-					}
-					else
-					{
-						const FVector SourceFar = FVector::DistSquared2D(
-							SrcBoundary->Curve.Points[0].Pos,
-							Closest.SourcePosition) > FVector::DistSquared2D(
-							SrcBoundary->Curve.Points.Last().Pos,
-							Closest.SourcePosition)
-							? SrcBoundary->Curve.Points[0].Pos
-							: SrcBoundary->Curve.Points.Last().Pos;
-						const FVector DestinationFar = FVector::DistSquared2D(
-							DstBoundary->Curve.Points[0].Pos,
-							Closest.DestinationPosition) > FVector::DistSquared2D(
-							DstBoundary->Curve.Points.Last().Pos,
-							Closest.DestinationPosition)
-							? DstBoundary->Curve.Points[0].Pos
-							: DstBoundary->Curve.Points.Last().Pos;
-						JunctionEdgeWidth = FVector::Dist2D(SourceFar, DestinationFar);
-					}
-					if (JunctionEdgeWidth <= UE_DOUBLE_SMALL_NUMBER || NoseGap >= JunctionEdgeWidth)
+					if (NoseGap > MaxGoreNoseGap)
 					{
 						SetBlocked(
 							Diagnostic,
 							FString::Printf(
-								TEXT("closest boundary approach %.0f cm does not narrow below junction edge %.0f cm"),
+								TEXT("closest boundary approach %.0f cm exceeds the %.0f cm gore-nose limit"),
 								NoseGap,
-								JunctionEdgeWidth));
+								MaxGoreNoseGap));
 						continue;
 					}
 				}
@@ -1111,11 +1584,11 @@ void AJunctionActor::BuildGoreMarkings()
 				Diagnostic.Status = bExactIntersection
 					? FString::Printf(TEXT("READY %d/%d | exact boundary crossing | %d wedge points"), Diagnostic.RequirementsMet, FGoreDiagnostic::RequirementCount, Polygon.Num())
 					: FString::Printf(
-						TEXT("READY %d/%d | closest-approach nose %.0f cm < junction edge %.0f cm | %d wedge points"),
+						TEXT("READY %d/%d | closest-approach nose %.0f cm <= %.0f cm limit | %d wedge points"),
 						Diagnostic.RequirementsMet,
 						FGoreDiagnostic::RequirementCount,
 						NoseGap,
-						JunctionEdgeWidth,
+						MaxGoreNoseGap,
 						Polygon.Num());
 			}
 		}
@@ -1350,7 +1823,75 @@ void AJunctionActor::RemoveTurnRestriction(int FromGate, int ToGate)
 
 ARoadScene* AJunctionActor::GetScene()
 {
-	return Cast<ARoadScene>(GetAttachParentActor());
+	if (ARoadScene* AttachedScene = Cast<ARoadScene>(GetAttachParentActor()))
+	{
+		return AttachedScene;
+	}
+	return OwningScene.Get();
+}
+
+void AJunctionActor::SetOwningScene(ARoadScene* Scene)
+{
+	OwningScene = Scene;
+}
+
+void AJunctionActor::RegisterGeneratedChild(AActor* Actor)
+{
+	if (IsValid(Actor))
+	{
+		GeneratedChildren.AddUnique(Actor);
+	}
+}
+
+void AJunctionActor::ClearGeneratedChildren()
+{
+	for (const TSoftObjectPtr<AActor>& ChildRef : GeneratedChildren)
+	{
+		if (AActor* Child = ChildRef.Get(); IsValid(Child) && !Child->IsActorBeingDestroyed())
+		{
+			Child->Destroy();
+		}
+	}
+	GeneratedChildren.Reset();
+}
+
+void AJunctionActor::SynchronizeWorldPartitionChildren()
+{
+	for (FJunctionGate& Gate : Gates)
+	{
+		for (FJunctionLink& Link : Gate.Links)
+		{
+			if (IsValid(Link.Road))
+			{
+				Link.Road->SetOwningJunction(this);
+				RegisterGeneratedChild(Link.Road);
+				RoadBuilderWorldPartition::ParentGeneratedActor(Link.Road, this);
+				Link.Road->SynchronizeWorldPartitionChildren();
+			}
+		}
+	}
+	for (ATrafficLightActor* Light : TrafficLights)
+	{
+		RegisterGeneratedChild(Light);
+		RoadBuilderWorldPartition::ParentGeneratedActor(Light, this);
+	}
+	for (ATrafficSignActor* Sign : TrafficSigns)
+	{
+		RegisterGeneratedChild(Sign);
+		RoadBuilderWorldPartition::ParentGeneratedActor(Sign, this);
+	}
+	for (ATurnArrowActor* Arrow : TurnArrows)
+	{
+		RegisterGeneratedChild(Arrow);
+		RoadBuilderWorldPartition::ParentGeneratedActor(Arrow, this);
+	}
+	TArray<AActor*> AttachedActors;
+	GetAttachedActors(AttachedActors, true, true);
+	for (AActor* AttachedActor : AttachedActors)
+	{
+		RegisterGeneratedChild(AttachedActor);
+		RoadBuilderWorldPartition::ParentGeneratedActor(AttachedActor, this);
+	}
 }
 
 void AJunctionActor::ExportXodr(FXmlNode* XmlNode, int& RoadId, int& ObjectId)
@@ -1366,10 +1907,12 @@ void AJunctionActor::ExportXodr(FXmlNode* XmlNode, int& RoadId, int& ObjectId)
 
 void AJunctionActor::Destroyed()
 {
+	ClearGeneratedChildren();
 	CleanupTrafficControl();
 	CleanupTurnArrows();
 	for (FJunctionGate& Gate : Gates)
 		Gate.Clear();
+	RoadBuilderWorldPartition::DestroyAttachedGeneratedActors(this);
 	AActor::Destroyed();
 }
 
@@ -1437,7 +1980,7 @@ void AJunctionActor::GenerateTrafficControl()
 			if (Light)
 			{
 				Light->GateIndex = i;
-				Light->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+				RoadBuilderWorldPartition::ParentGeneratedActor(Light, this);
 				if (UStaticMesh* Mesh = Settings->TrafficLightMesh.LoadSynchronous())
 					Light->PoleMesh->SetStaticMesh(Mesh);
 				// Offset phases so opposing traffic alternates
@@ -1458,7 +2001,7 @@ void AJunctionActor::GenerateTrafficControl()
 			{
 				Sign->SignType = TrafficControlType;
 				Sign->GateIndex = i;
-				Sign->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+				RoadBuilderWorldPartition::ParentGeneratedActor(Sign, this);
 				UStaticMesh* Mesh = (TrafficControlType == ETrafficControlType::StopSign)
 					? Settings->StopSignMesh.LoadSynchronous()
 					: Settings->YieldSignMesh.LoadSynchronous();
@@ -1538,7 +2081,7 @@ void AJunctionActor::GenerateTurnArrows()
 				Arrow->ArrowType = ArrowType;
 				Arrow->GateIndex = i;
 				Arrow->LaneIndex = d;
-				Arrow->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+				RoadBuilderWorldPartition::ParentGeneratedActor(Arrow, this);
 				if (ArrowMesh)
 					Arrow->ArrowMesh->SetStaticMesh(ArrowMesh);
 				TurnArrows.Add(Arrow);
@@ -1622,6 +2165,12 @@ bool ARoadScene::IsTrafficHandednessApplied() const
 
 void ARoadScene::ApplyTrafficHandedness()
 {
+	FString FailureReason;
+	if (!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected traffic-handedness update for %s: %s."), *GetName(), *FailureReason);
+		return;
+	}
 	Modify();
 	Rebuild();
 }
@@ -1652,7 +2201,8 @@ ARoadActor* ARoadScene::AddRoad()
 		GetWorld(), ARoadActor::StaticClass(), FTransform::Identity, this));
 	if (Road)
 	{
-		Road->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+		Road->SetOwningScene(this);
+		RoadBuilderWorldPartition::ParentGeneratedActor(Road, this);
 		Roads.Add(Road);
 	}
 	return Road;
@@ -1660,6 +2210,12 @@ ARoadActor* ARoadScene::AddRoad()
 
 ARoadActor* ARoadScene::RuntimeCreateRoad(const TArray<FVector>& WorldPoints, URoadStyle* Style, bool bRebuildScene)
 {
+	FString FailureReason;
+	if (!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected runtime road creation for %s: %s."), *GetName(), *FailureReason);
+		return nullptr;
+	}
 	if (WorldPoints.Num() < 2)
 	{
 		return nullptr;
@@ -1685,8 +2241,14 @@ ARoadActor* ARoadScene::RuntimeCreateRoad(const TArray<FVector>& WorldPoints, UR
 
 bool ARoadScene::RuntimeDestroyRoad(ARoadActor* Road, bool bRebuildScene)
 {
-	if (!IsValid(Road) || !Roads.Contains(Road))
+	FString FailureReason;
+	if (!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason) || !IsValid(Road) || !Roads.Contains(Road))
 	{
+		if (IsValid(Road))
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected runtime road deletion for %s: %s."), *Road->GetName(),
+				FailureReason.IsEmpty() ? TEXT("the road is not owned by this scene") : *FailureReason);
+		}
 		return false;
 	}
 
@@ -1700,6 +2262,12 @@ bool ARoadScene::RuntimeDestroyRoad(ARoadActor* Road, bool bRebuildScene)
 
 void ARoadScene::RuntimeRebuild()
 {
+	FString FailureReason;
+	if (!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected runtime rebuild for %s: %s."), *GetName(), *FailureReason);
+		return;
+	}
 	RemoveInvalidReferences();
 	for (ARoadActor* Road : Roads)
 	{
@@ -1714,17 +2282,39 @@ void ARoadScene::RuntimeRebuild()
 ARoadActor* ARoadScene::AddRoad(URoadStyle* Style, double Height)
 {
 	ARoadActor* Road = AddRoad();
-	Road->InitWithStyle(Style, Height);
+	if (Road)
+	{
+		Road->InitWithStyle(Style, Height);
+	}
 	return Road;
 }
 
 ARoadActor* ARoadScene::DuplicateRoad(ARoadActor* Source)
 {
-	ULevel* Level = GetWorld()->GetCurrentLevel();
-	ARoadActor* Road = CastChecked<ARoadActor>(StaticDuplicateObject(Source, Level));
+	FString FailureReason;
+	if (!IsValid(Source) || Source->GetScene() != this ||
+		!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected road duplication in %s: %s."), *GetName(),
+			FailureReason.IsEmpty() ? TEXT("the source road is invalid or owned by another scene") : *FailureReason);
+		return nullptr;
+	}
+	ULevel* Level = Source->GetLevel();
+	if (!IsValid(Level) || !GetWorld()->GetLevels().Contains(Level))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected road duplication for %s because its owning level is not loaded."), *Source->GetName());
+		return nullptr;
+	}
+	ARoadActor* Road = Cast<ARoadActor>(StaticDuplicateObject(Source, Level));
+	if (!IsValid(Road))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected road duplication for %s because Unreal could not create its actor."), *Source->GetName());
+		return nullptr;
+	}
+	Road->SetOwningScene(this);
 	RoadBuilderWorldPartition::SynchronizeGeneratedActor(Road, this);
 	Road->RegisterAllComponents();
-	Road->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+	RoadBuilderWorldPartition::ParentGeneratedActor(Road, this);
 	Roads.Add(Road);
 #if WITH_EDITOR
 	Level->AddLoadedActor(Road);
@@ -1773,7 +2363,8 @@ AGroundActor* ARoadScene::AddGround(TMap<ARoadActor*, TArray<FJunctionSlot>>& Ro
 	if (Ground)
 	{
 		Ground->Points = Points;
-		Ground->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+		Ground->SetOwningScene(this);
+		RoadBuilderWorldPartition::ParentGeneratedActor(Ground, this);
 		Grounds.Add(Ground);
 	}
 	return Ground;
@@ -1781,6 +2372,14 @@ AGroundActor* ARoadScene::AddGround(TMap<ARoadActor*, TArray<FJunctionSlot>>& Ro
 
 AJunctionActor* ARoadScene::AddJunction(ARoadActor* R0, double D0, ARoadActor* R1, double D1)
 {
+	FString FailureReason;
+	if (!IsValid(R0) || !IsValid(R1) || !FMath::IsFinite(D0) || !FMath::IsFinite(D1) ||
+		!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected junction creation in %s: %s."), *GetName(),
+			FailureReason.IsEmpty() ? TEXT("the road pair or intersection distance is invalid") : *FailureReason);
+		return nullptr;
+	}
 	for (AJunctionActor* Junction : Junctions)
 	{
 		bool C0 = Junction->Contains(R0, D0);
@@ -1800,13 +2399,41 @@ AJunctionActor* ARoadScene::AddJunction(ARoadActor* R0, double D0, ARoadActor* R
 	}
 	Junction->AddRoad(R0, D0);
 	Junction->AddRoad(R1, D1);
-	Junction->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+	Junction->SetOwningScene(this);
+	RoadBuilderWorldPartition::ParentGeneratedActor(Junction, this);
 	Junctions.Add(Junction);
 	return Junction;
 }
 
 void ARoadScene::SynchronizeWorldPartitionChildren()
 {
+	for (ARoadActor* Road : Roads)
+	{
+		if (IsValid(Road))
+		{
+			Road->SetOwningScene(this);
+			RoadBuilderWorldPartition::ParentGeneratedActor(Road, this);
+			Road->SynchronizeWorldPartitionChildren();
+		}
+	}
+	for (AJunctionActor* Junction : Junctions)
+	{
+		if (IsValid(Junction))
+		{
+			Junction->SetOwningScene(this);
+			RoadBuilderWorldPartition::ParentGeneratedActor(Junction, this);
+			Junction->SynchronizeWorldPartitionChildren();
+		}
+	}
+	for (AGroundActor* Ground : Grounds)
+	{
+		if (IsValid(Ground))
+		{
+			Ground->SetOwningScene(this);
+			RoadBuilderWorldPartition::ParentGeneratedActor(Ground, this);
+			Ground->SynchronizeWorldPartitionChildren();
+		}
+	}
 	RoadBuilderWorldPartition::SynchronizeGeneratedChildren(this);
 }
 
@@ -1894,6 +2521,31 @@ FVector2D ARoadScene::GetRoadUV(ARoadActor* SelectedRoad, const FVector& Pos)
 */
 void ARoadScene::Rebuild()
 {
+	FString FailureReason;
+	if (!RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected scene rebuild for %s: %s."), *GetName(), *FailureReason);
+		return;
+	}
+	if (bIsRebuilding)
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected nested scene rebuild for %s while the previous rebuild is still running."), *GetName());
+		return;
+	}
+	TGuardValue<bool> RebuildGuard(bIsRebuilding, true);
+	// Migrate any pre-fix attachment hierarchy before it can be saved again.
+	// In World Partition this converts generated children to soft ownership.
+	SynchronizeWorldPartitionChildren();
+	for (ARoadActor* Road : Roads)
+	{
+		FString RoadFailureReason;
+		if (IsValid(Road) && !Road->IsLink() && !Road->HasSafeAuthoredCurve(&RoadFailureReason))
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected scene rebuild for %s because road %s is unsafe: %s."),
+				*GetName(), *Road->GetName(), *RoadFailureReason);
+			return;
+		}
+	}
 	RemoveInvalidReferences();
 	for (ARoadActor* Road : Roads)
 	{
@@ -2145,6 +2797,24 @@ void ARoadScene::Rebuild()
 			Road->BuildMesh(RoadSlots[Road]);
 		}
 	}
+	// A newly discovered junction can need the rebuilt parent-road boundary
+	// meshes before its corner polygon becomes non-degenerate. Retry only a
+	// missing surface after those roads are ready; established junctions keep
+	// their single-pass behavior and authored/generated markings are preserved.
+	for (AJunctionActor* Junction : Junctions)
+	{
+		if (!IsValid(Junction))
+		{
+			continue;
+		}
+		const UStaticMeshComponent* JunctionMesh = Cast<UStaticMeshComponent>(Junction->GetRootComponent());
+		const bool bHasSurface = Junction->LastBuildTriangleCount > 0 ||
+			(JunctionMesh && JunctionMesh->GetStaticMesh());
+		if (!bHasSurface)
+		{
+			Junction->Build(false);
+		}
+	}
 	GenerateGrounds(RoadSlots);
 	for (AGroundActor* Ground : Grounds)
 	{
@@ -2163,10 +2833,21 @@ void ARoadScene::Rebuild()
 
 void ARoadScene::RebuildHeightOnly(ARoadActor* ChangedRoad)
 {
-	if (!IsValid(ChangedRoad))
+	FString FailureReason;
+	if (!IsValid(ChangedRoad) || !RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
 	{
+		if (IsValid(ChangedRoad))
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected height-only rebuild for %s: %s."), *ChangedRoad->GetName(), *FailureReason);
+		}
 		return;
 	}
+	if (bIsRebuilding)
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected nested height-only rebuild for %s while another rebuild is running."), *GetName());
+		return;
+	}
+	TGuardValue<bool> RebuildGuard(bIsRebuilding, true);
 
 	// UpdateCurve propagates elevation changes into directly connected child
 	// roads, including children owned by another loaded World Partition sector.
@@ -2405,7 +3086,8 @@ static AActor* CreateZoneShapeForLane(
 		return nullptr;
 	}
 
-	AActor* ShapeActor = World->SpawnActor<AActor>();
+	AActor* ShapeActor = RoadBuilderWorldPartition::SpawnGeneratedActor(
+		World, AActor::StaticClass(), FTransform::Identity, Parent);
 	if (!ShapeActor)
 	{
 		return nullptr;
@@ -2414,7 +3096,7 @@ static AActor* CreateZoneShapeForLane(
 	USceneComponent* Root = NewObject<USceneComponent>(ShapeActor, TEXT("Root"));
 	ShapeActor->SetRootComponent(Root);
 	Root->RegisterComponent();
-	ShapeActor->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
+	RoadBuilderWorldPartition::ParentGeneratedActor(ShapeActor, Parent);
 
 	UZoneShapeComponent* ShapeComponent = NewObject<UZoneShapeComponent>(ShapeActor, TEXT("ZoneShape"));
 	ShapeComponent->SetupAttachment(Root);
@@ -2662,6 +3344,15 @@ void ARoadScene::OctreeRemoveRoad(ARoadActor* Road)
 
 void ARoadScene::DestroyRoad(ARoadActor* Road)
 {
+	FString FailureReason;
+	if (!IsValid(Road) || !RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(GetWorld(), this, &FailureReason))
+	{
+		if (IsValid(Road))
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected road deletion for %s: %s."), *Road->GetName(), *FailureReason);
+		}
+		return;
+	}
 	if (!IsValid(Road))
 	{
 		RemoveInvalidReferences();

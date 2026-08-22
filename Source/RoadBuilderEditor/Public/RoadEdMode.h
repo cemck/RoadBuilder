@@ -101,6 +101,8 @@ public:
 	void DrawJunctions(FPrimitiveDrawInterface* PDI);
 	static bool IsValidRoadPointSelection(const ARoadActor* Road, int32 PointIndex);
 	static bool IsValidHeightPointSelection(const ARoadActor* Road, int32 PointIndex);
+	static bool IsValidBoundarySegmentSelection(const URoadBoundary* Boundary, int32 SegmentIndex);
+	static bool IsValidBoundaryOffsetSelection(const URoadBoundary* Boundary, int32 OffsetIndex);
 	bool LazyRebuild = false;
 };
 
@@ -244,7 +246,7 @@ public:
 class FRoadTool_LaneWidth : public FRoadTool
 {
 public:
-	virtual bool ShouldDrawWidget() const { return OffsetIndex != INDEX_NONE; }
+	virtual bool ShouldDrawWidget() const;
 	virtual FVector GetWidgetLocation() const;
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData);
 	virtual EAxisList::Type GetWidgetAxisToDraw() const { return EAxisList::XY; }
@@ -252,10 +254,7 @@ public:
 	virtual bool InputKey(FEditorViewportClient* ViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event);
 	virtual bool InputDelta(FEditorViewportClient* InViewportClient, FViewport* InViewport, FVector& InDrag, FRotator& InRot, FVector& InScale);
 	virtual void Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI);
-	virtual void NotifyPreChange(FProperty* PropertyAboutToChange)
-	{
-		CurrentBoundary->Modify();
-	}
+	virtual void NotifyPreChange(FProperty* PropertyAboutToChange);
 	virtual void Reset()
 	{
 		FRoadTool::Reset();
@@ -269,18 +268,16 @@ public:
 class FRoadTool_MarkingLane : public FRoadTool
 {
 public:
-	virtual bool ShouldDrawWidget() const { return SegmentIndex != INDEX_NONE; }
+	virtual bool ShouldDrawWidget() const;
 	virtual FVector GetWidgetLocation() const;
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData);
 	virtual EAxisList::Type GetWidgetAxisToDraw() const { return EAxisList::X; }
 	virtual bool HandleClick(FEditorViewportClient* InViewportClient, HHitProxy* HitProxy, const FViewportClick& Click);
 	virtual bool InputKey(FEditorViewportClient* ViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event);
 	virtual bool InputDelta(FEditorViewportClient* InViewportClient, FViewport* InViewport, FVector& InDrag, FRotator& InRot, FVector& InScale);
+	virtual bool EndModify() override;
 	virtual void Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI);
-	virtual void NotifyPreChange(FProperty* PropertyAboutToChange)
-	{
-		CurrentBoundary->Modify();
-	}
+	virtual void NotifyPreChange(FProperty* PropertyAboutToChange);
 	virtual void Reset()
 	{
 		FRoadTool::Reset();
@@ -294,17 +291,19 @@ public:
 class FRoadTool_MarkingPoint : public FRoadTool
 {
 public:
-	virtual bool ShouldDrawWidget() const { return CurrentMarking != nullptr; }
+	virtual bool ShouldDrawWidget() const;
 	virtual FVector GetWidgetLocation() const;
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData);
 	virtual EAxisList::Type GetWidgetAxisToDraw() const { return EAxisList::XY; }
 	virtual bool HandleClick(FEditorViewportClient* InViewportClient, HHitProxy* HitProxy, const FViewportClick& Click);
 	virtual bool InputKey(FEditorViewportClient* ViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event);
 	virtual bool InputDelta(FEditorViewportClient* InViewportClient, FViewport* InViewport, FVector& InDrag, FRotator& InRot, FVector& InScale);
+	virtual bool EndModify() override;
 	virtual void Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI);
 	virtual void NotifyPreChange(FProperty* PropertyAboutToChange)
 	{
-		CurrentMarking->Modify();
+		if (IsValid(CurrentMarking))
+			CurrentMarking->Modify();
 	}
 	virtual void Reset()
 	{
@@ -317,11 +316,7 @@ public:
 class FRoadTool_MarkingCurve : public FRoadTool
 {
 public:
-	virtual bool ShouldDrawWidget() const
-	{
-		return IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints &&
-			(PointIndex == INDEX_NONE ? !CurrentMarking->Points.IsEmpty() : CurrentMarking->Points.IsValidIndex(PointIndex));
-	}
+	virtual bool ShouldDrawWidget() const;
 	virtual FVector GetWidgetLocation() const;
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData);
 	virtual EAxisList::Type GetWidgetAxisToDraw() const { return EAxisList::XY; }

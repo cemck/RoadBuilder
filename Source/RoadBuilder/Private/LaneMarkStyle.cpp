@@ -7,7 +7,7 @@
 void ULaneMarkStyle::BuildMesh(UObject* Caller, FRoadMesh& Builder, const FPolyline& Curve)
 {
 	TArray<double> DashOffsets, SolidOffsets;
-	AJunctionActor* Junction = Cast<AJunctionActor>(Cast<ARoadActor>(Caller)->GetAttachParentActor());
+	AJunctionActor* Junction = Cast<ARoadActor>(Caller)->GetJunction();
 	switch (MarkType)
 	{
 	case ELaneMarkType::Dash:
@@ -76,7 +76,7 @@ void ULaneMarkStyle::BuildMesh(UObject* Caller, FRoadMesh& Builder, const FPolyl
 void UCrosswalkStyle::BuildMesh(UObject* Caller, FRoadMesh& Builder, const FPolyline& Curve)
 {
 	FPolyline Points = Curve.Resample(DashLength + DashGap);
-	AJunctionActor* Junction = Cast<AJunctionActor>(Cast<ARoadActor>(Caller)->GetAttachParentActor());
+	AJunctionActor* Junction = Cast<ARoadActor>(Caller)->GetJunction();
 	for (int i = 0; i < Points.Points.Num(); i++)
 	{
 		FVector VDir = Points.GetStraightDir(i);
@@ -139,7 +139,7 @@ void UPolygonMarkStyle::BuildMesh(UObject* Caller, FRoadMesh& Builder, const FPo
 	FBox Box(EForceInit::ForceInit);
 	for (const FPolyPoint& Point : Curve.Points)
 		Box += Trans.InverseTransformPosition(Point.Pos);
-	AJunctionActor* Junction = Cast<AJunctionActor>(Road->GetAttachParentActor());
+	AJunctionActor* Junction = Road->GetJunction();
 	auto CreateLine = [&Trans](const FVector& Start, const FVector& End)->FLine
 	{
 		return { Trans.TransformPosition(Start), Trans.TransformPosition(End) };

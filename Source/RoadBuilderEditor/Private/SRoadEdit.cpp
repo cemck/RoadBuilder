@@ -15,6 +15,41 @@
 #include "PropertyEditorModule.h"
 
 #define LOCTEXT_NAMESPACE "RoadBuilder"
+
+namespace
+{
+	bool IsValidBoundarySegmentSelection(URoadBoundary* Boundary, int32 Index)
+	{
+		ARoadActor* Road = IsValid(Boundary) ? Boundary->GetRoad() : nullptr;
+		return IsValid(Road) && Road->Boundaries.Contains(Boundary) && Boundary->Segments.IsValidIndex(Index);
+	}
+
+	void RebuildBoundaryStyleMesh(URoadBoundary* Boundary)
+	{
+		ARoadActor* Road = IsValid(Boundary) ? Boundary->GetRoad() : nullptr;
+		if (!IsValid(Road) || !Road->Boundaries.Contains(Boundary))
+		{
+			return;
+		}
+
+		Road->UpdateLanes();
+		TArray<FJunctionSlot> Slots;
+		if (!Road->IsLink())
+		{
+			if (ARoadScene* Scene = Road->GetScene(); IsValid(Scene))
+			{
+				Slots = Scene->GetJunctionSlots(Road);
+			}
+		}
+		Road->BuildMesh(Slots);
+		if (AJunctionActor* Junction = Road->GetJunction(); IsValid(Junction))
+		{
+			Junction->Modify();
+			Junction->CaptureLinkOverrides();
+		}
+	}
+}
+
 BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 void SRoadEdit::Construct(const FArguments& InArgs)
 {
@@ -368,7 +403,7 @@ void SRoadEdit::SetEditBoundaryOffset(URoadBoundary* Boundary, int Index)
 void SRoadEdit::SetEditBoundarySegment(URoadBoundary* Boundary, int Index)
 {
 	StructDetailsView->GetOnFinishedChangingPropertiesDelegate().Clear();
-	if (Boundary && Index != INDEX_NONE)
+	if (IsValidBoundarySegmentSelection(Boundary, Index))
 	{
 		StructDetailsView->SetStructureData(MakeShareable(new FStructOnScope(FBoundarySegment::StaticStruct(), (uint8*)&Boundary->Segments[Index])));
 		StructDetailsView->GetOnFinishedChangingPropertiesDelegate().AddSP(this, &SRoadEdit::OnBoundarySegmentPropertyChanged, Boundary, Index);
@@ -482,11 +517,24 @@ void SRoadEdit::OnBoundaryOffsetPropertyChanged(const FPropertyChangedEvent& Pro
 
 void SRoadEdit::OnBoundarySegmentPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, URoadBoundary* Boundary, int Index)
 {
+	if (!IsValidBoundarySegmentSelection(Boundary, Index))
+	{
+		SetEditNone();
+		return;
+	}
+
 	ARoadActor* Road = Boundary->GetRoad();
-	if (PropertyChangedEvent.MemberProperty->GetFName() == GET_MEMBER_NAME_CHECKED(FBoundarySegment, Dist))
+	if (PropertyChangedEvent.MemberProperty &&
+		PropertyChangedEvent.MemberProperty->GetFName() == GET_MEMBER_NAME_CHECKED(FBoundarySegment, Dist))
+	{
 		ClampDist(Boundary->Segments, Index, Road->Length());
-	Road->UpdateLanes();
-	Road->GetScene()->Rebuild();
+	}
+
+	// LaneMarking and Props are style data. Rebuilding the entire RoadScene here
+	// can merge junctions and replace this connector/boundary while the structure
+	// details widget is still reading &Segments[Index]. Rebuild only the owning
+	// road mesh and persist link overrides; the edited struct address stays valid.
+	RebuildBoundaryStyleMesh(Boundary);
 }
 
 void SRoadEdit::OnMarkingPointPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, UMarkingPoint* Marking)
@@ -501,6 +549,11 @@ void SRoadEdit::OnMarkingPointPropertyChanged(const FPropertyChangedEvent& Prope
 			Slots = Scene->GetJunctionSlots(Road);
 	}
 	Road->BuildMesh(Slots);
+	if (AJunctionActor* Junction = Road->GetJunction(); IsValid(Junction))
+	{
+		Junction->Modify();
+		Junction->CaptureLinkOverrides();
+	}
 }
 
 void SRoadEdit::OnMarkingCurvePropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, UMarkingCurve* Marking)
@@ -515,6 +568,11 @@ void SRoadEdit::OnMarkingCurvePropertyChanged(const FPropertyChangedEvent& Prope
 			Slots = Scene->GetJunctionSlots(Road);
 	}
 	Road->BuildMesh(Slots);
+	if (AJunctionActor* Junction = Road->GetJunction(); IsValid(Junction))
+	{
+		Junction->Modify();
+		Junction->CaptureLinkOverrides();
+	}
 }
 
 void SRoadEdit::OnMarkingCurvePointPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, UMarkingCurve* Marking, int Index)

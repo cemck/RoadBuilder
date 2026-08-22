@@ -120,6 +120,10 @@ struct FRoadActorBuilder
 
 inline void BuildStrip(const FPolyline& LeftCurve, const FPolyline& RightCurve, TFunction<void(int,int,bool)>&& AddTriangle)
 {
+	if (LeftCurve.Points.Num() < 2 || RightCurve.Points.Num() < 2)
+	{
+		return;
+	}
 	int CurLeft = 0, CurRight = 0;
 	bool Ascending = LeftCurve.Points.Last().Dist > LeftCurve.Points[0].Dist || RightCurve.Points.Last().Dist > RightCurve.Points[0].Dist;
 	auto Behind = [&]()

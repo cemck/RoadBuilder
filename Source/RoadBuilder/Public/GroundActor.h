@@ -47,12 +47,16 @@ class ROADBUILDER_API AGroundActor : public AActor
 	GENERATED_UCLASS_BODY()
 public:
 	void AddManualPoint(const FVector& Pos, int& Index);
-	void Destroy();
 	void Join(AGroundActor* Other, int& Index);
 	void BuildMesh(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots);
 	bool Contains(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots, const TArray<FGroundPoint>& OtherPoints);
+	void SetOwningScene(ARoadScene* Scene);
+	void RegisterGeneratedChild(AActor* Actor);
+	void ClearGeneratedChildren();
+	void SynchronizeWorldPartitionChildren();
 	ARoadScene* GetScene();
 	TArray<FVector> GetVertices(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots);
+	virtual void Destroyed() override;
 	
 	UFUNCTION(CallInEditor, Category = Ground)
 	void CreatePCGSpline();
@@ -86,4 +90,10 @@ public:
 
 	UPROPERTY()
 	bool bClosedLoop = false;
+
+	UPROPERTY()
+	TSoftObjectPtr<ARoadScene> OwningScene;
+
+	UPROPERTY()
+	TArray<TSoftObjectPtr<AActor>> GeneratedChildren;
 };

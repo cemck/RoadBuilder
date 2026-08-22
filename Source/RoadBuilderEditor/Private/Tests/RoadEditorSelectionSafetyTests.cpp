@@ -5,8 +5,23 @@
 #include "Misc/AutomationTest.h"
 #include "Editor.h"
 #include "RoadActor.h"
+#include "RoadBuilderWorldPartition.h"
 #include "RoadEdMode.h"
+#include "RoadMesh.h"
 #include "RoadScene.h"
+#include "Components/StaticMeshComponent.h"
+
+namespace
+{
+	bool HasGeneratedJunctionSurface(const AJunctionActor* Junction)
+	{
+		const UStaticMeshComponent* Component = Junction
+			? Cast<UStaticMeshComponent>(Junction->GetRootComponent())
+			: nullptr;
+		return Junction && Junction->LastBuildTriangleCount > 0 &&
+			Component && Component->GetStaticMesh();
+	}
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRoadBuilderRoadPointSelectionSafetyTest,
@@ -75,6 +90,281 @@ bool FRoadBuilderRoadPointSelectionSafetyTest::RunTest(const FString& Parameters
 		FRoadTool::IsValidHeightPointSelection(Road, Road->HeightPoints.Num()));
 
 	Road->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadBuilderMarkingClearSafetyTest,
+	"RoadBuilder.Editor.MarkingClearSafety",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadBuilderMarkingClearSafetyTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	TestNotNull(TEXT("An editor world is available"), World);
+	if (!World)
+	{
+		return false;
+	}
+
+	ARoadActor* Road = World->SpawnActor<ARoadActor>();
+	TestNotNull(TEXT("A transient marking owner can be created"), Road);
+	if (!Road)
+	{
+		return false;
+	}
+	Road->SetFlags(RF_Transient);
+
+	UMarkingCurve* Marking = Road->AddMarkingCurve(true);
+	TestNotNull(TEXT("An authored marking can be created"), Marking);
+	Road->Markings.Add(Marking); // Reproduce an older duplicated owner reference.
+	TestEqual(TEXT("The duplicate marking reference is present before clear"), Road->Markings.Num(), 2);
+	Road->DeleteMarking(Marking);
+	TestEqual(TEXT("Clear removes every duplicate owner reference"), Road->Markings.Num(), 0);
+	TestFalse(TEXT("Clear does not begin destroying a marking still referenced by editor state"),
+		Marking->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed));
+
+	UMarkingPoint* Point = Road->AddMarkingPoint(FVector2D::ZeroVector);
+	UMarkingCurve* Curve = Road->AddMarkingCurve();
+	Road->DeleteAllMarkings();
+	TestEqual(TEXT("Clear all detaches every marking"), Road->Markings.Num(), 0);
+	TestFalse(TEXT("Clear all leaves point lifetime to GC"), Point->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed));
+	TestFalse(TEXT("Clear all leaves curve lifetime to GC"), Curve->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed));
+
+	Road->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadBuilderBoundarySegmentSelectionSafetyTest,
+	"RoadBuilder.Editor.BoundarySegmentSelectionSafety",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadBuilderBoundarySegmentSelectionSafetyTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	TestNotNull(TEXT("An editor world is available"), World);
+	if (!World)
+	{
+		return false;
+	}
+
+	ARoadActor* Road = World->SpawnActor<ARoadActor>();
+	TestNotNull(TEXT("A transient boundary owner can be created"), Road);
+	if (!Road)
+	{
+		return false;
+	}
+	Road->SetFlags(RF_Transient);
+	Road->Init(0.0);
+	URoadBoundary* Boundary = Road->BaseCurve;
+	Boundary->Segments.Add({ 500.0, nullptr, nullptr });
+
+	TestTrue(TEXT("A live boundary segment can be exposed to structure details"),
+		FRoadTool::IsValidBoundarySegmentSelection(Boundary, 1));
+	Boundary->Segments[1].LaneMarking = nullptr;
+	TestTrue(TEXT("Clearing LaneMarking keeps the live segment selection valid"),
+		FRoadTool::IsValidBoundarySegmentSelection(Boundary, 1));
+	Boundary->DeleteSegment(1);
+	TestFalse(TEXT("A segment index invalidated by RemoveAt is rejected before editor reuse"),
+		FRoadTool::IsValidBoundarySegmentSelection(Boundary, 1));
+	URoadBoundary* DetachedBoundary = NewObject<URoadBoundary>(Road);
+	DetachedBoundary->Segments.AddDefaulted();
+	TestFalse(TEXT("A detached boundary is rejected even if its local index exists"),
+		FRoadTool::IsValidBoundarySegmentSelection(DetachedBoundary, 0));
+
+	Road->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadBuilderGeometryActionSafetyTest,
+	"RoadBuilder.Editor.GeometryActionSafety",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadBuilderGeometryActionSafetyTest::RunTest(const FString& Parameters)
+{
+	FString FailureReason;
+	TestFalse(
+		TEXT("Generated actor mutation rejects a missing world"),
+		RoadBuilderWorldPartition::CanMutateGeneratedActorGraph(nullptr, nullptr, &FailureReason));
+	TestFalse(TEXT("A rejected mutation supplies a failure reason"), FailureReason.IsEmpty());
+
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	TestNotNull(TEXT("An editor world is available"), World);
+	if (!World)
+	{
+		return false;
+	}
+
+	ARoadScene* Scene = World->SpawnActor<ARoadScene>();
+	TestNotNull(TEXT("A transient RoadScene can be created"), Scene);
+	if (!Scene)
+	{
+		return false;
+	}
+	Scene->SetFlags(RF_Transient);
+	ARoadActor* Road = Scene->AddRoad(nullptr, 0.0);
+	TestNotNull(TEXT("A road can be created in the safe scene"), Road);
+	if (!Road)
+	{
+		Scene->Destroy();
+		return false;
+	}
+	Road->SetFlags(RF_Transient);
+	TestTrue(
+		TEXT("A finite runtime road is accepted"),
+		Road->RuntimeSetRoadPoints(
+			{ FVector(0.0, 0.0, 0.0), FVector(10000.0, 0.0, 0.0), FVector(10000.0, 10000.0, 0.0) },
+			false));
+	TestTrue(TEXT("A valid authored curve is safe to rebuild"), Road->HasSafeAuthoredCurve(&FailureReason));
+	const int32 ValidSegmentCount = Road->RoadSegments.Num();
+
+	Road->RoadPoints[1].MaxRadius = 0.0;
+	TestFalse(TEXT("A zero-radius turn is rejected before rebuilding"), Road->HasSafeAuthoredCurve(&FailureReason));
+	Road->UpdateCurve();
+	TestEqual(
+		TEXT("Rejected curve changes retain the previous render-safe derived geometry"),
+		Road->RoadSegments.Num(),
+		ValidSegmentCount);
+	Scene->Rebuild();
+	TestEqual(
+		TEXT("The scene rejects the unsafe action before regenerating actor children"),
+		Road->RoadSegments.Num(),
+		ValidSegmentCount);
+
+	Road->RoadPoints[1].MaxRadius = 50000.0;
+	Road->UpdateCurve();
+	Scene->Rebuild();
+	TestTrue(TEXT("The repaired road accepts rebuilding again"), Road->HasSafeDerivedGeometry(&FailureReason));
+
+	// Detached World Partition geometry actors are selectable at the Outliner
+	// root.  Moving one must not apply a second transform to world-space mesh
+	// vertices or make a junction appear to lose its generated mesh.
+	Road->SetLockLocation(false);
+	Road->SetActorTransform(FTransform(FRotator(0.0, 25.0, 0.0), FVector(1234.0, -5678.0, 900.0), FVector(2.0)));
+	RoadBuilderWorldPartition::PrepareGeneratedGeometryActor(Road);
+	TestTrue(TEXT("Generated geometry actors are restored to the world-space identity transform"), Road->GetActorTransform().Equals(FTransform::Identity));
+	TestTrue(TEXT("Generated geometry actors reject accidental editor movement"), Road->IsLockLocation());
+
+	// Height points may be dragged only inside their neighboring interval.  A
+	// crossed point used to leave decreasing derived distances, causing every
+	// connected junction to reject its mesh rebuild.
+	FHeightPoint CrossedHeightPoint;
+	CrossedHeightPoint.Dist = Road->Length() * 2.0;
+	CrossedHeightPoint.Height = 250.0;
+	CrossedHeightPoint.Range = 0.0;
+	Road->HeightPoints.Insert(CrossedHeightPoint, 1);
+	Road->UpdateCurve();
+	TestTrue(TEXT("A crossed height point is clamped before derived geometry is generated"),
+		Road->HeightPoints[1].Dist > Road->HeightPoints[0].Dist &&
+		Road->HeightPoints[1].Dist < Road->HeightPoints[2].Dist);
+	TestTrue(TEXT("A zero-range crossed height edit still produces safe derived geometry"), Road->HasSafeDerivedGeometry(&FailureReason));
+	for (int32 SegmentIndex = 1; SegmentIndex < Road->HeightSegments.Num(); ++SegmentIndex)
+	{
+		TestTrue(TEXT("Derived height segment distances remain strictly increasing"),
+			Road->HeightSegments[SegmentIndex].Dist > Road->HeightSegments[SegmentIndex - 1].Dist + UE_DOUBLE_SMALL_NUMBER);
+	}
+
+	FStaticRoadMesh Mesh;
+	Mesh.AddTriangles(nullptr, { FIndex3i(0, 1, 3) }, { FVector::ZeroVector, FVector(100.0, 0.0, 0.0), FVector(0.0, 100.0, 0.0) }, FVector::UpVector);
+	TestEqual(TEXT("Invalid triangle indices are rejected before mesh creation"), Mesh.GetTriangleCount(), 0);
+
+	Road->Destroy();
+	Scene->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadBuilderJunctionMeshSafetyTest,
+	"RoadBuilder.Editor.JunctionMeshSafety",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadBuilderJunctionMeshSafetyTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	TestNotNull(TEXT("An editor world is available"), World);
+	if (!World)
+	{
+		return false;
+	}
+
+	URoadStyle* MainStyle = LoadObject<URoadStyle>(
+		nullptr,
+		TEXT("/RoadBuilder/RoadStyles/Highway-Main-6-Lanes.Highway-Main-6-Lanes"));
+	TestNotNull(TEXT("The junction test road style is available"), MainStyle);
+	if (!MainStyle)
+	{
+		return false;
+	}
+
+	ARoadScene* Scene = World->SpawnActor<ARoadScene>();
+	TestNotNull(TEXT("A transient junction RoadScene can be created"), Scene);
+	if (!Scene)
+	{
+		return false;
+	}
+	Scene->SetFlags(RF_Transient);
+
+	ARoadActor* EastWestRoad = Scene->AddRoad(MainStyle, 0.0);
+	ARoadActor* NorthSouthRoad = Scene->AddRoad(MainStyle, 0.0);
+	TestNotNull(TEXT("The east-west junction road can be created"), EastWestRoad);
+	TestNotNull(TEXT("The north-south junction road can be created"), NorthSouthRoad);
+	if (!EastWestRoad || !NorthSouthRoad)
+	{
+		RoadBuilderWorldPartition::DestroyAttachedGeneratedActors(Scene);
+		Scene->Destroy();
+		return false;
+	}
+	EastWestRoad->SetFlags(RF_Transient);
+	NorthSouthRoad->SetFlags(RF_Transient);
+	TestTrue(TEXT("The east-west road accepts its crossing geometry"), EastWestRoad->RuntimeSetRoadPoints(
+		{ FVector(-10000.0, 0.0, 0.0), FVector(10000.0, 0.0, 0.0) }, false));
+	TestTrue(TEXT("The north-south road accepts its crossing geometry"), NorthSouthRoad->RuntimeSetRoadPoints(
+		{ FVector(0.0, -10000.0, 0.0), FVector(0.0, 10000.0, 0.0) }, false));
+	Scene->Rebuild();
+
+	TestTrue(TEXT("A crossing creates at least one junction"), Scene->Junctions.Num() > 0);
+	AJunctionActor* Junction = Scene->Junctions.IsEmpty() ? nullptr : Scene->Junctions[0];
+	TestNotNull(TEXT("The crossing exposes a valid junction actor"), Junction);
+	UStaticMeshComponent* JunctionMeshComponent = Junction
+		? Cast<UStaticMeshComponent>(Junction->GetRootComponent())
+		: nullptr;
+	TestNotNull(TEXT("The junction has a static mesh root component"), JunctionMeshComponent);
+	TestTrue(TEXT("The scene rebuild emits junction source triangles"),
+		Junction && Junction->LastBuildTriangleCount > 0);
+	TestNotNull(TEXT("The scene rebuild assigns the generated junction mesh"),
+		JunctionMeshComponent ? JunctionMeshComponent->GetStaticMesh().Get() : nullptr);
+
+	if (Junction)
+	{
+		Junction->SetLockLocation(false);
+		Junction->SetActorTransform(FTransform(FRotator(10.0, 20.0, 30.0), FVector(4000.0, 5000.0, 6000.0), FVector(1.5)));
+		Junction->Build();
+		TestTrue(TEXT("A moved junction is restored to the generated world-space transform"),
+			Junction->GetActorTransform().Equals(FTransform::Identity));
+		TestTrue(TEXT("A rebuilt junction is locked against later editor movement"), Junction->IsLockLocation());
+		JunctionMeshComponent = Cast<UStaticMeshComponent>(Junction->GetRootComponent());
+		TestTrue(TEXT("The restored junction still has a generated surface mesh"),
+			HasGeneratedJunctionSurface(Junction));
+	}
+
+	FHeightPoint CrossedHeightPoint;
+	CrossedHeightPoint.Dist = EastWestRoad->Length() * 2.0;
+	CrossedHeightPoint.Height = 400.0;
+	CrossedHeightPoint.Range = 0.0;
+	EastWestRoad->HeightPoints.Insert(CrossedHeightPoint, 1);
+	EastWestRoad->UpdateCurve();
+	Scene->RebuildHeightOnly(EastWestRoad);
+	FString FailureReason;
+	TestTrue(TEXT("A crossed road-height edit is repaired before the junction rebuild"),
+		EastWestRoad->HasSafeDerivedGeometry(&FailureReason));
+	JunctionMeshComponent = Junction ? Cast<UStaticMeshComponent>(Junction->GetRootComponent()) : nullptr;
+	TestTrue(TEXT("The junction surface survives the repaired height edit"),
+		HasGeneratedJunctionSurface(Junction));
+
+	RoadBuilderWorldPartition::DestroyAttachedGeneratedActors(Scene);
+	Scene->Destroy();
 	return true;
 }
 

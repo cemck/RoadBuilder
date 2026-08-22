@@ -2,6 +2,7 @@
 // Copyright 2024. All Rights Reserved.
 
 #include "GroundActor.h"
+#include "RoadBuilder.h"
 #include "RoadScene.h"
 #include "RoadBuilderWorldPartition.h"
 #include "Components/SplineComponent.h"
@@ -86,6 +87,9 @@ AGroundActor::AGroundActor(const FObjectInitializer& ObjectInitializer) : Super(
 #else
 	RootComponent = CreateDefaultSubobject<URoadMeshComponent>(TEXT("RootComponent"));
 #endif
+#if WITH_EDITOR
+	SetLockLocation(true);
+#endif
 }
 
 void AGroundActor::AddManualPoint(const FVector& Pos, int& Index)
@@ -98,14 +102,11 @@ void AGroundActor::AddManualPoint(const FVector& Pos, int& Index)
 		Points.Insert(NewPt, 0);
 }
 
-void AGroundActor::Destroy()
+void AGroundActor::Destroyed()
 {
-	ForEachAttachedActors([&](AActor* Actor)->bool
-	{
-		Actor->Destroy();
-		return true;
-	});
-	AActor::Destroy();
+	ClearGeneratedChildren();
+	RoadBuilderWorldPartition::DestroyAttachedGeneratedActors(this);
+	Super::Destroyed();
 }
 
 void AGroundActor::Join(AGroundActor* Other, int& Index)
@@ -136,6 +137,7 @@ void AGroundActor::Join(AGroundActor* Other, int& Index)
 
 void AGroundActor::BuildMesh(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots)
 {
+	RoadBuilderWorldPartition::PrepareGeneratedGeometryActor(this);
 	FRoadMesh Builder;
 	if (bClosedLoop)
 	{
@@ -163,7 +165,54 @@ bool AGroundActor::Contains(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots,
 
 ARoadScene* AGroundActor::GetScene()
 {
-	return Cast<ARoadScene>(GetAttachParentActor());
+	if (ARoadScene* AttachedScene = Cast<ARoadScene>(GetAttachParentActor()))
+	{
+		return AttachedScene;
+	}
+	return OwningScene.Get();
+}
+
+void AGroundActor::SetOwningScene(ARoadScene* Scene)
+{
+	OwningScene = Scene;
+}
+
+void AGroundActor::RegisterGeneratedChild(AActor* Actor)
+{
+	if (IsValid(Actor))
+	{
+		GeneratedChildren.AddUnique(Actor);
+	}
+}
+
+void AGroundActor::ClearGeneratedChildren()
+{
+	for (const TSoftObjectPtr<AActor>& ChildRef : GeneratedChildren)
+	{
+		if (AActor* Child = ChildRef.Get(); IsValid(Child) && !Child->IsActorBeingDestroyed())
+		{
+			Child->Destroy();
+		}
+	}
+	GeneratedChildren.Reset();
+}
+
+void AGroundActor::SynchronizeWorldPartitionChildren()
+{
+	for (const TSoftObjectPtr<AActor>& ChildRef : GeneratedChildren)
+	{
+		if (AActor* Child = ChildRef.Get(); IsValid(Child))
+		{
+			RoadBuilderWorldPartition::ParentGeneratedActor(Child, this);
+		}
+	}
+	TArray<AActor*> AttachedActors;
+	GetAttachedActors(AttachedActors, true, true);
+	for (AActor* AttachedActor : AttachedActors)
+	{
+		RegisterGeneratedChild(AttachedActor);
+		RoadBuilderWorldPartition::ParentGeneratedActor(AttachedActor, this);
+	}
 }
 
 TArray<FVector> AGroundActor::GetVertices(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots)
@@ -308,7 +357,13 @@ TArray<FVector> AGroundActor::GetVertices(TMap<ARoadActor*, TArray<FJunctionSlot
 
 void AGroundActor::CreatePCGSpline()
 {
-	TMap<ARoadActor*, TArray<FJunctionSlot>> RoadSlots = GetScene()->GetAllJunctionSlots();
+	ARoadScene* Scene = GetScene();
+	if (!IsValid(Scene))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected PCG spline generation for %s because its owning RoadScene is not loaded."), *GetName());
+		return;
+	}
+	TMap<ARoadActor*, TArray<FJunctionSlot>> RoadSlots = Scene->GetAllJunctionSlots();
 	TArray<FVector> Vertices = GetVertices(RoadSlots);
 	AActor* Actor = RoadBuilderWorldPartition::SpawnGeneratedActor(GetWorld(), AActor::StaticClass(), FTransform::Identity, this);
 	if (!Actor)
@@ -324,7 +379,8 @@ void AGroundActor::CreatePCGSpline()
 	UPCGComponent* PCGComponent = NewObject<UPCGComponent>(Actor, TEXT("PCG Component"));
 	Actor->AddInstanceComponent(PCGComponent);
 	Actor->RegisterAllComponents();
-	Actor->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+	RegisterGeneratedChild(Actor);
+	RoadBuilderWorldPartition::ParentGeneratedActor(Actor, this);
 	Spline->ClearSplinePoints(false);
 	for (int i = 0; i < Vertices.Num(); i++)
 		Spline->AddPoint(FSplinePoint(i, Vertices[i], ESplinePointType::Linear));

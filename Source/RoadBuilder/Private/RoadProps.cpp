@@ -50,7 +50,8 @@ void URoadProps::Generate(ARoadActor* Road, const FPolyline& Baseline, FRoadActo
 					AActor* Actor = RoadBuilderWorldPartition::SpawnGeneratedActor(GetWorld(), BP->GeneratedClass, Trans, Road);
 					if (Actor)
 					{
-						Actor->AttachToActor(Road, FAttachmentTransformRules::KeepWorldTransform);
+						Road->RegisterGeneratedChild(Actor);
+						RoadBuilderWorldPartition::ParentGeneratedActor(Actor, Road);
 					}
 				}
 				else if (UMaterialInterface* Material = Cast<UMaterialInterface>(Asset))

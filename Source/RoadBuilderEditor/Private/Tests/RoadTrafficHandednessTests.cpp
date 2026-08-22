@@ -241,7 +241,12 @@ bool FRoadBuilderGeneratedWorldGoreWedgeTest::RunTest(const FString& Parameters)
 	URoadStyle* MainStyle = LoadObject<URoadStyle>(
 		nullptr,
 		TEXT("/RoadBuilder/RoadStyles/Highway-Main-6-Lanes.Highway-Main-6-Lanes"));
-	UPolygonMarkStyle* GoreStyle = GetMutableDefault<USettings_Global>()->DefaultGoreMarking.LoadSynchronous();
+	// Load the fixture explicitly: a project setting of None intentionally
+	// disables automatic gore generation and must not make this mesh-unit test
+	// rewrite or override that choice.
+	UPolygonMarkStyle* GoreStyle = LoadObject<UPolygonMarkStyle>(
+		nullptr,
+		TEXT("/RoadBuilder/MarkStyles/PolygonMark/ChevronRegion.ChevronRegion"));
 	TestNotNull(TEXT("The highway main style is available"), MainStyle);
 	TestNotNull(TEXT("The default gore style is available"), GoreStyle);
 	if (!MainStyle || !GoreStyle)
@@ -533,10 +538,276 @@ bool FRoadBuilderRampSnappingAndForkTopologyTest::RunTest(const FString& Paramet
 			FString::Printf(TEXT("The %s junction links survive a marking-only Apply/Rebuild"), HandednessName),
 			PreservedLinkCount > 0);
 
+		// A geometry/topology edit can discard a generated connector actor rather
+		// than merely refreshing it. The junction must restore the authored
+		// boundary styles and markings onto that replacement actor.
+		AJunctionActor* RecreatedLinkJunction = nullptr;
+		FJunctionLink* RecreatedLink = nullptr;
+		ARoadActor* RecreatedInputRoad = nullptr;
+		ARoadActor* RecreatedOutputRoad = nullptr;
+		double RecreatedInputDist = 0.0;
+		double RecreatedOutputDist = 0.0;
+		int32 RecreatedLinkIndex = INDEX_NONE;
+		for (AJunctionActor* Junction : Scene->Junctions)
+		{
+			if (!IsValid(Junction) || RecreatedLink)
+				continue;
+			for (int32 GateIndex = 0; GateIndex < Junction->Gates.Num() && !RecreatedLink; ++GateIndex)
+			{
+				FJunctionGate& Gate = Junction->Gates[GateIndex];
+				for (int32 LinkIndex = 0; LinkIndex < Gate.Links.Num(); ++LinkIndex)
+				{
+					if (!IsValid(Gate.Links[LinkIndex].Road))
+						continue;
+					RecreatedLinkJunction = Junction;
+					RecreatedLink = &Gate.Links[LinkIndex];
+					RecreatedInputRoad = Gate.Road;
+					RecreatedOutputRoad = Junction->Gates[(GateIndex + LinkIndex) % Junction->Gates.Num()].Road;
+					RecreatedInputDist = Gate.InitDist;
+					RecreatedOutputDist = Junction->Gates[(GateIndex + LinkIndex) % Junction->Gates.Num()].InitDist;
+					RecreatedLinkIndex = LinkIndex;
+					break;
+				}
+			}
+		}
+		TestTrue(
+			FString::Printf(TEXT("The %s fork exposes a connector for replacement persistence"), HandednessName),
+			IsValid(RecreatedLinkJunction) && RecreatedLink && IsValid(RecreatedLink->Road));
+		if (IsValid(RecreatedLinkJunction) && RecreatedLink && IsValid(RecreatedLink->Road))
+		{
+			RecreatedLink->Radius = 1750.0;
+			RecreatedLink->Road->AddMarkingPoint(FVector2D(RecreatedLink->Road->Length() * 0.5, 123.0));
+			RecreatedLinkJunction->CaptureLinkOverrides();
+			// Do not call FJunctionLink::Destroy here: it is intentionally an
+			// unexported runtime helper. This is the equivalent replacement path
+			// from the junction's point of view after its actor is discarded.
+			RecreatedLink->Road->Destroy();
+			RecreatedLink->Road = nullptr;
+			RecreatedLink->Radius = 1000.0;
+			Scene->Rebuild();
+
+			ARoadActor* RestoredLinkRoad = nullptr;
+			FJunctionLink* RestoredLink = nullptr;
+			for (int32 GateIndex = 0; GateIndex < RecreatedLinkJunction->Gates.Num(); ++GateIndex)
+			{
+				FJunctionGate& Gate = RecreatedLinkJunction->Gates[GateIndex];
+				for (int32 LinkIndex = 0; LinkIndex < Gate.Links.Num(); ++LinkIndex)
+				{
+					const FJunctionGate& OutputGate = RecreatedLinkJunction->Gates[
+						(GateIndex + LinkIndex) % RecreatedLinkJunction->Gates.Num()];
+					if (Gate.Road == RecreatedInputRoad && OutputGate.Road == RecreatedOutputRoad &&
+						LinkIndex == RecreatedLinkIndex &&
+						FMath::IsNearlyEqual(Gate.InitDist, RecreatedInputDist) &&
+						FMath::IsNearlyEqual(OutputGate.InitDist, RecreatedOutputDist))
+					{
+						RestoredLinkRoad = Gate.Links[LinkIndex].Road;
+						RestoredLink = &Gate.Links[LinkIndex];
+						break;
+					}
+				}
+				if (IsValid(RestoredLinkRoad))
+					break;
+			}
+			TestTrue(
+				FString::Printf(TEXT("A %s replaced junction connector is regenerated"), HandednessName),
+				IsValid(RestoredLinkRoad));
+			if (IsValid(RestoredLinkRoad))
+			{
+				TestEqual(
+					FString::Printf(TEXT("A %s recreated junction connector keeps its radius override"), HandednessName),
+					RestoredLink ? RestoredLink->Radius : 0.0,
+					1750.0);
+				bool bFoundRestoredPoint = false;
+				for (URoadMarking* Marking : RestoredLinkRoad->Markings)
+				{
+					if (const UMarkingPoint* Point = Cast<UMarkingPoint>(Marking))
+					{
+						bFoundRestoredPoint |= FMath::IsNearlyEqual(Point->Point.X, RestoredLinkRoad->Length() * 0.5, 1.0) &&
+							FMath::IsNearlyEqual(Point->Point.Y, 123.0, 0.01);
+					}
+				}
+				TestTrue(
+					FString::Printf(TEXT("A %s recreated junction connector restores authored point markings"), HandednessName),
+					bFoundRestoredPoint);
+
+				auto CountAuthoredMarkings = [](const ARoadActor* Road)
+				{
+					int32 Count = 0;
+					for (URoadMarking* Marking : Road->Markings)
+					{
+						if (IsValid(Cast<UMarkingPoint>(Marking)))
+						{
+							++Count;
+						}
+						else if (const UMarkingCurve* Curve = Cast<UMarkingCurve>(Marking);
+							IsValid(Curve) && !Curve->bUseGeneratedWorldPoints)
+						{
+							++Count;
+						}
+					}
+					return Count;
+				};
+				auto AddDuplicateCurveFixture = [RestoredLinkRoad]()
+				{
+					UMarkingCurve* Curve = RestoredLinkRoad->AddMarkingCurve(true);
+					FMarkingCurvePoint& P0 = Curve->Points.AddDefaulted_GetRef();
+					P0.Pos = FVector2D(RestoredLinkRoad->Length() * 0.25, -321.0);
+					FMarkingCurvePoint& P1 = Curve->Points.AddDefaulted_GetRef();
+					P1.Pos = FVector2D(RestoredLinkRoad->Length() * 0.50, -123.0);
+					FMarkingCurvePoint& P2 = Curve->Points.AddDefaulted_GetRef();
+					P2.Pos = FVector2D(RestoredLinkRoad->Length() * 0.75, -321.0);
+					return Curve;
+				};
+				auto FindSavedLinkOverride = [&]() -> const FJunctionLinkOverride*
+				{
+					return RecreatedLinkJunction->PersistentLinkOverrides.FindByPredicate(
+						[&](const FJunctionLinkOverride& Override)
+						{
+							return Override.InputRoad == RecreatedInputRoad &&
+								Override.OutputRoad == RecreatedOutputRoad &&
+								Override.LinkIndex == RecreatedLinkIndex &&
+								FMath::IsNearlyEqual(Override.InputGateInitDist, RecreatedInputDist, 1.0) &&
+								FMath::IsNearlyEqual(Override.OutputGateInitDist, RecreatedOutputDist, 1.0);
+						});
+				};
+
+				URoadBoundary* BoundaryStyleFixture = RestoredLinkRoad->Boundaries.IsEmpty()
+					? nullptr
+					: RestoredLinkRoad->Boundaries[0];
+				TestNotNull(
+					FString::Printf(TEXT("The %s connector exposes a boundary style fixture"), HandednessName),
+					BoundaryStyleFixture);
+				if (IsValid(BoundaryStyleFixture) && !BoundaryStyleFixture->Segments.IsEmpty())
+				{
+					const FBoundarySegment DuplicateSegment = BoundaryStyleFixture->Segments[0];
+					BoundaryStyleFixture->Segments.Add(DuplicateSegment);
+					RecreatedLinkJunction->CaptureLinkOverrides();
+					RecreatedLinkJunction->ApplyLinkOverrides();
+					int32 DuplicateDistanceCount = 0;
+					for (const FBoundarySegment& Segment : BoundaryStyleFixture->Segments)
+					{
+						DuplicateDistanceCount += FMath::IsNearlyEqual(Segment.Dist, DuplicateSegment.Dist, 0.01) ? 1 : 0;
+					}
+					TestEqual(
+						FString::Printf(TEXT("The %s connector snapshot collapses duplicate green boundary segments"), HandednessName),
+						DuplicateDistanceCount,
+						1);
+
+					const int32 JunctionCountBeforeStyleClear = Scene->Junctions.Num();
+					BoundaryStyleFixture->Segments[0].LaneMarking = nullptr;
+					RestoredLinkRoad->UpdateLanes();
+					RestoredLinkRoad->BuildMesh(TArray<FJunctionSlot>());
+					RecreatedLinkJunction->CaptureLinkOverrides();
+					TestTrue(
+						FString::Printf(TEXT("Clearing a %s connector boundary style keeps the connector actor alive"), HandednessName),
+						RestoredLink && RestoredLink->Road == RestoredLinkRoad && IsValid(RestoredLinkRoad));
+					TestEqual(
+						FString::Printf(TEXT("Clearing a %s connector boundary style does not merge junction topology"), HandednessName),
+						Scene->Junctions.Num(),
+						JunctionCountBeforeStyleClear);
+
+					// Restore the fixture for the existing persistence assertions below.
+					BoundaryStyleFixture->Segments[0].LaneMarking = JunctionMarkingOverride;
+					RestoredLinkRoad->UpdateLanes();
+					RestoredLinkRoad->BuildMesh(TArray<FJunctionSlot>());
+					RecreatedLinkJunction->CaptureLinkOverrides();
+				}
+
+				const int32 BaselineAuthoredCount = CountAuthoredMarkings(RestoredLinkRoad);
+				AddDuplicateCurveFixture();
+				AddDuplicateCurveFixture();
+				RecreatedLinkJunction->CaptureLinkOverrides();
+				const FJunctionLinkOverride* DeduplicatedOverride = FindSavedLinkOverride();
+				TestNotNull(
+					FString::Printf(TEXT("The %s connector keeps a persistence snapshot"), HandednessName),
+					DeduplicatedOverride);
+				TestEqual(
+					FString::Printf(TEXT("The %s connector snapshot collapses duplicate authored curves"), HandednessName),
+					DeduplicatedOverride ? DeduplicatedOverride->AuthoredMarkings.Num() : 0,
+					BaselineAuthoredCount + 1);
+				RecreatedLinkJunction->ApplyLinkOverrides();
+				TestEqual(
+					FString::Printf(TEXT("The %s connector removes duplicate live authored curves"), HandednessName),
+					CountAuthoredMarkings(RestoredLinkRoad),
+					BaselineAuthoredCount + 1);
+
+				UMarkingCurve* CurveToClear = nullptr;
+				for (URoadMarking* Marking : RestoredLinkRoad->Markings)
+				{
+					if (UMarkingCurve* Curve = Cast<UMarkingCurve>(Marking);
+						IsValid(Curve) && !Curve->bUseGeneratedWorldPoints && Curve->Points.Num() == 3 &&
+						FMath::IsNearlyEqual(Curve->Points[0].Pos.Y, -321.0, 0.01))
+					{
+						CurveToClear = Curve;
+						break;
+					}
+				}
+				TestNotNull(
+					FString::Printf(TEXT("The %s connector exposes the deduplicated curve for clear"), HandednessName),
+					CurveToClear);
+				if (CurveToClear)
+				{
+					RestoredLinkRoad->DeleteMarking(CurveToClear);
+					TestFalse(
+						FString::Printf(TEXT("Clearing the %s connector curve does not begin UObject destruction"), HandednessName),
+						CurveToClear->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed));
+				}
+				RecreatedLinkJunction->CaptureLinkOverrides();
+				const FJunctionLinkOverride* ClearedOverride = FindSavedLinkOverride();
+				TestEqual(
+					FString::Printf(TEXT("The %s connector persists the cleared authored curve state"), HandednessName),
+					ClearedOverride ? ClearedOverride->AuthoredMarkings.Num() : -1,
+					BaselineAuthoredCount);
+
+				// Simulate an obsolete actor copy appearing before a merge. Applying
+				// the cleared snapshot must remove it instead of duplicating it.
+				AddDuplicateCurveFixture();
+				RecreatedLinkJunction->ApplyLinkOverrides();
+				TestEqual(
+					FString::Printf(TEXT("The %s connector does not resurrect a cleared curve"), HandednessName),
+					CountAuthoredMarkings(RestoredLinkRoad),
+					BaselineAuthoredCount);
+				for (URoadBoundary* Boundary : RestoredLinkRoad->Boundaries)
+				{
+					if (!IsValid(Boundary))
+						continue;
+					for (const FBoundarySegment& Segment : Boundary->Segments)
+					{
+						TestEqual(
+							FString::Printf(TEXT("A %s recreated junction connector restores marking overrides"), HandednessName),
+							Segment.LaneMarking,
+							JunctionMarkingOverride);
+						TestEqual(
+							FString::Printf(TEXT("A %s recreated junction connector restores prop overrides"), HandednessName),
+							Segment.Props,
+							JunctionPropsOverride);
+					}
+				}
+			}
+		}
+
 		// Elevation edits use a narrower path than XY/topology edits. Verify that
 		// this path keeps both lane-boundary overrides and authored marking UObject
 		// identity while updating the road's height curve.
-		ARoadActor* HeightTestLinkRoad = EditedLinkRoads.IsEmpty() ? nullptr : EditedLinkRoads[0].Get();
+		ARoadActor* HeightTestLinkRoad = nullptr;
+		for (AJunctionActor* Junction : Scene->Junctions)
+		{
+			if (!IsValid(Junction) || IsValid(HeightTestLinkRoad))
+				continue;
+			for (const FJunctionGate& Gate : Junction->Gates)
+			{
+				for (const FJunctionLink& Link : Gate.Links)
+				{
+					if (IsValid(Link.Road))
+					{
+						HeightTestLinkRoad = Link.Road;
+						break;
+					}
+				}
+				if (IsValid(HeightTestLinkRoad))
+					break;
+			}
+		}
 		UMarkingPoint* HeightTestAuthoredMarking = IsValid(HeightTestLinkRoad)
 			? HeightTestLinkRoad->AddMarkingPoint(FVector2D(HeightTestLinkRoad->Length() * 0.5, 0.0))
 			: nullptr;

@@ -2,6 +2,7 @@
 // Copyright 2024. All Rights Reserved.
 
 #include "RoadMesh.h"
+#include "RoadBuilder.h"
 #include "RoadBuilderSettings.h"
 #include "Components/DecalComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -12,6 +13,50 @@
 #endif
 #pragma warning(disable:4456)
 #include "../../ThirdParty/CDT/include/CDT.h"
+
+namespace
+{
+	bool IsFinitePosition(const FVector& Position)
+	{
+		return FMath::IsFinite(Position.X) && FMath::IsFinite(Position.Y) && FMath::IsFinite(Position.Z) &&
+			FMath::Abs(Position.X) <= HALF_WORLD_MAX && FMath::Abs(Position.Y) <= HALF_WORLD_MAX && FMath::Abs(Position.Z) <= HALF_WORLD_MAX;
+	}
+
+	bool IsFiniteUV(const FVector2D& UV)
+	{
+		return FMath::IsFinite(UV.X) && FMath::IsFinite(UV.Y);
+	}
+
+	bool HasRenderablePolyline(const FPolyline& Curve)
+	{
+		if (Curve.Points.Num() < 2)
+		{
+			return false;
+		}
+		for (const FPolyPoint& Point : Curve.Points)
+		{
+			if (!IsFinitePosition(Point.Pos) || !FMath::IsFinite(Point.Dist))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool IsRenderableTriangle(const FIndex3i& Triangle, const TArray<FVector>& Vertices)
+	{
+		for (int32 Corner = 0; Corner < 3; ++Corner)
+		{
+			if (Triangle[Corner] < 0 || Triangle[Corner] >= Vertices.Num() || !IsFinitePosition(Vertices[Triangle[Corner]]))
+			{
+				return false;
+			}
+		}
+		const FVector EdgeA = Vertices[Triangle[1]] - Vertices[Triangle[0]];
+		const FVector EdgeB = Vertices[Triangle[2]] - Vertices[Triangle[0]];
+		return FVector::CrossProduct(EdgeA, EdgeB).SizeSquared() > UE_DOUBLE_SMALL_NUMBER;
+	}
+}
 
 FStaticRoadMesh::FStaticRoadMesh()
 {
@@ -69,6 +114,11 @@ FPolygonGroupID FStaticRoadMesh::GetGroupID(UMaterialInterface* Material)
 void FStaticRoadMesh::AddStrip(UMaterialInterface* Material, const FPolyline& LeftCurve, const FPolyline& RightCurve)
 {
 	SCOPE_CYCLE_COUNTER(STAT_AddStrip);
+	if (!HasRenderablePolyline(LeftCurve) || !HasRenderablePolyline(RightCurve))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected an invalid road strip before static-mesh generation."));
+		return;
+	}
 	FPolygonGroupID Group = GetGroupID(Material);
 	TArray<FVertexID> VertexIDs;
 	VertexIDs.AddUninitialized(LeftCurve.Points.Num() + RightCurve.Points.Num());
@@ -86,6 +136,10 @@ void FStaticRoadMesh::AddStrip(UMaterialInterface* Material, const FPolyline& Le
 		const FVector& P1 = RightCurve.Points[RightStart].Pos;
 		const FVector& P2 = LeftSide ? LeftCurve.Points[LeftStart + 1].Pos : RightCurve.Points[RightStart + 1].Pos;
 		FVector Cross = (P2 - P0).GetSafeNormal() ^ (P1 - P0).GetSafeNormal();
+		if (Cross.SizeSquared() <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			return;
+		}
 		FVector Base = Cross.Z > 0 ? FVector::UpVector : FVector::DownVector;
 		int BaseIndex = NumTriangles * 3;
 		InstanceIDs[BaseIndex + 0] = Builder->AppendInstance(VertexIDs[LeftStart]);
@@ -105,6 +159,27 @@ void FStaticRoadMesh::AddStrip(UMaterialInterface* Material, const FPolyline& Le
 
 void FStaticRoadMesh::AddPolygon(UMaterialInterface* SurfaceMaterial, UMaterialInterface* BackfaceMaterial, const TArray<FVector>& Points)
 {
+	if (Points.Num() < 3)
+	{
+		return;
+	}
+	double TwiceArea = 0.0;
+	for (int32 Index = 0; Index < Points.Num(); ++Index)
+	{
+		const FVector& Point = Points[Index];
+		const FVector& Next = Points[(Index + 1) % Points.Num()];
+		if (!IsFinitePosition(Point) || FVector::DistSquared2D(Point, Next) <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected an invalid polygon before static-mesh generation."));
+			return;
+		}
+		TwiceArea += Point.X * Next.Y - Next.X * Point.Y;
+	}
+	if (!FMath::IsFinite(TwiceArea) || FMath::Abs(TwiceArea) <= UE_DOUBLE_SMALL_NUMBER)
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected a degenerate polygon before static-mesh generation."));
+		return;
+	}
 	auto cdt = CDT::Triangulation<double>(CDT::VertexInsertionOrder::AsProvided, CDT::IntersectingConstraintEdges::Resolve, 0);
 	std::vector<CDT::V2d<double>> verts;
 	std::vector<CDT::Edge> edges;
@@ -150,6 +225,11 @@ void FStaticRoadMesh::AddPolygon(UMaterialInterface* SurfaceMaterial, UMaterialI
 		FVector& P1 = Verts[edge.v1()];
 		FVector& P2 = Verts[edge.v2()];
 		double Distance = FVector2D::Distance((FVector2D&)P1, (FVector2D&)P2);
+		if (!FMath::IsFinite(Distance) || Distance <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected a polygon with a collapsed triangulation edge."));
+			return;
+		}
 		auto Solve = [&](int Index)
 		{
 			if (Index >= Points.Num() && !BoundaryVertices.Contains(Index))
@@ -164,6 +244,7 @@ void FStaticRoadMesh::AddPolygon(UMaterialInterface* SurfaceMaterial, UMaterialI
 	}
 	while (TrianglesToSolve.Num())
 	{
+		bool bMadeProgress = false;
 		auto GetVerticesToSolve = [&](FIndex3i& Triangle)->TArray<int>
 		{
 			TArray<int> Vertices;
@@ -192,7 +273,13 @@ void FStaticRoadMesh::AddPolygon(UMaterialInterface* SurfaceMaterial, UMaterialI
 					InnerVertices.Add(Triangle[j]);
 				}
 				TrianglesToSolve.RemoveAt(i);
+				bMadeProgress = true;
 			}
+		}
+		if (!bMadeProgress)
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected a polygon whose triangulation could not resolve every interior vertex."));
+			return;
 		}
 	}
 	int NumSmoothIteration = 8;
@@ -218,6 +305,19 @@ void FStaticRoadMesh::AddPolygon(UMaterialInterface* SurfaceMaterial, UMaterialI
 
 void FStaticRoadMesh::AddPolygons(UMaterialInterface* Material, const TArray<FVector>& Positions, const TArray<FVector2D>& UVs, int NumCols, int NumRows)
 {
+	if (NumCols <= 0 || NumRows <= 0 || Positions.Num() != (NumCols + 1) * (NumRows + 1) || UVs.Num() != Positions.Num())
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected a grid mesh with incompatible dimensions."));
+		return;
+	}
+	for (int32 Index = 0; Index < Positions.Num(); ++Index)
+	{
+		if (!IsFinitePosition(Positions[Index]) || !IsFiniteUV(UVs[Index]))
+		{
+			UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected a grid mesh with non-finite vertex data."));
+			return;
+		}
+	}
 	FPolygonGroupID Group = GetGroupID(Material);
 	TArray<FVertexID> VertexIDs;
 	VertexIDs.AddUninitialized(Positions.Num());
@@ -254,22 +354,40 @@ void FStaticRoadMesh::AddPolygons(UMaterialInterface* Material, const TArray<FVe
 
 void FStaticRoadMesh::AddTriangles(UMaterialInterface* Material, const TArray<FIndex3i>& Triangles, const TArray<FVector>& Vertices, const FVector& Normal)
 {
+	if (!IsFinitePosition(Normal))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected triangles with a non-finite normal."));
+		return;
+	}
+	TArray<FIndex3i> ValidTriangles;
+	ValidTriangles.Reserve(Triangles.Num());
+	for (const FIndex3i& Triangle : Triangles)
+	{
+		if (IsRenderableTriangle(Triangle, Vertices))
+		{
+			ValidTriangles.Add(Triangle);
+		}
+	}
+	if (ValidTriangles.IsEmpty())
+	{
+		return;
+	}
 	FPolygonGroupID Group = GetGroupID(Material);
 	TArray<FVertexID> VertexIDs;
 	VertexIDs.AddUninitialized(Vertices.Num());
 	for (int i = 0; i < Vertices.Num(); i++)
 		VertexIDs[i] = Builder->AppendVertex(Vertices[i]);
 	TArray<FVertexInstanceID> InstanceIDs;
-	InstanceIDs.AddUninitialized(Triangles.Num()*3);
+	InstanceIDs.AddUninitialized(ValidTriangles.Num()*3);
 	double UVScale = GetMutableDefault<USettings_Global>()->UVScale;
-	for (int i = 0; i < Triangles.Num(); i++)
+	for (int i = 0; i < ValidTriangles.Num(); i++)
 	{
 		for (int j = 0; j < 3; j++)
 		{
 			int Index = i * 3 + j;
-			InstanceIDs[Index] = Builder->AppendInstance(VertexIDs[Triangles[i][j]]);
+			InstanceIDs[Index] = Builder->AppendInstance(VertexIDs[ValidTriangles[i][j]]);
 			Builder->SetInstanceNormal(InstanceIDs[Index], Normal);
-			Builder->SetInstanceUV(InstanceIDs[Index], FVector2D(Vertices[Triangles[i][j]]) * UVScale, 0);
+			Builder->SetInstanceUV(InstanceIDs[Index], FVector2D(Vertices[ValidTriangles[i][j]]) * UVScale, 0);
 		}
 		Builder->AppendTriangle(InstanceIDs[i * 3 + 0], InstanceIDs[i * 3 + 1], InstanceIDs[i * 3 + 2], Group);
 	}
@@ -278,12 +396,20 @@ void FStaticRoadMesh::AddTriangles(UMaterialInterface* Material, const TArray<FI
 void FStaticRoadMesh::Build(USceneComponent* Component)
 {
 	SCOPE_CYCLE_COUNTER(STAT_BuildMesh);
-	Cast<UStaticMeshComponent>(Component)->SetStaticMesh(CreateMesh(Component->GetOwner()));
+	if (UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(Component))
+	{
+		StaticMeshComponent->SetStaticMesh(CreateMesh(Component->GetOwner()));
+	}
 }
 
 void FProcRoadMesh::AddStrip(UMaterialInterface* Material, const FPolyline& LeftCurve, const FPolyline& RightCurve)
 {
 	SCOPE_CYCLE_COUNTER(STAT_AddStrip);
+	if (!HasRenderablePolyline(LeftCurve) || !HasRenderablePolyline(RightCurve))
+	{
+		UE_LOG(LogRoadBuilder, Warning, TEXT("RoadBuilder rejected an invalid procedural road strip."));
+		return;
+	}
 	FProcMeshSection& Section = Sections.FindOrAdd(Material);
 	int BaseVertex = Section.ProcVertexBuffer.Num();
 	Section.ProcVertexBuffer.AddUninitialized(LeftCurve.Points.Num() + RightCurve.Points.Num());
@@ -311,6 +437,13 @@ void FProcRoadMesh::AddStrip(UMaterialInterface* Material, const FPolyline& Left
 	int NumTriangles = 0;
 	auto AddTriangle = [&](int LeftStart, int RightStart, bool LeftSide)
 	{
+		const FVector& P0 = LeftCurve.Points[LeftStart].Pos;
+		const FVector& P1 = RightCurve.Points[RightStart].Pos;
+		const FVector& P2 = LeftSide ? LeftCurve.Points[LeftStart + 1].Pos : RightCurve.Points[RightStart + 1].Pos;
+		if (FVector::CrossProduct(P2 - P0, P1 - P0).SizeSquared() <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			return;
+		}
 		int Base = BaseIndex + NumTriangles * 3;
 		Section.ProcIndexBuffer[Base + 0] = BaseVertex + LeftStart;
 		Section.ProcIndexBuffer[Base + 1] = BaseVertex + LeftCurve.Points.Num() + RightStart;
@@ -327,6 +460,19 @@ void FProcRoadMesh::AddPolygons(UMaterialInterface* Material, const TArray<FVect
 
 void FProcRoadMesh::AddTriangles(UMaterialInterface* Material, const TArray<FIndex3i>& Triangles, const TArray<FVector>& Vertices)
 {
+	TArray<FIndex3i> ValidTriangles;
+	ValidTriangles.Reserve(Triangles.Num());
+	for (const FIndex3i& Triangle : Triangles)
+	{
+		if (IsRenderableTriangle(Triangle, Vertices))
+		{
+			ValidTriangles.Add(Triangle);
+		}
+	}
+	if (ValidTriangles.IsEmpty())
+	{
+		return;
+	}
 	FProcMeshSection& Section = Sections.FindOrAdd(Material);
 	int BaseVertex = Section.ProcVertexBuffer.Num();
 	Section.ProcVertexBuffer.AddUninitialized(Vertices.Num());
@@ -340,10 +486,10 @@ void FProcRoadMesh::AddTriangles(UMaterialInterface* Material, const TArray<FInd
 		Section.SectionLocalBox += Vertex.Position;
 	}
 	int BaseIndex = Section.ProcIndexBuffer.Num();
-	Section.ProcIndexBuffer.AddUninitialized(Triangles.Num() * 3);
-	for (int i = 0; i < Triangles.Num(); i++)
+	Section.ProcIndexBuffer.AddUninitialized(ValidTriangles.Num() * 3);
+	for (int i = 0; i < ValidTriangles.Num(); i++)
 		for (int j = 0; j < 3; j++)
-			Section.ProcIndexBuffer[BaseIndex + i*3+j] = BaseVertex + Triangles[i][j];
+			Section.ProcIndexBuffer[BaseIndex + i*3+j] = BaseVertex + ValidTriangles[i][j];
 }
 
 void FProcRoadMesh::Build(USceneComponent* Component)
@@ -369,7 +515,12 @@ void FInstanceBuilder::AttachToActor(AActor* Actor)
 		Component->SetStaticMesh(KV.Key);
 		Component->SetCullDistances(0, 0);
 		for (FTransform& Instance : KV.Value.Instances)
-			Component->AddInstance(Instance);
+		{
+			if (Instance.IsValid())
+			{
+				Component->AddInstance(Instance);
+			}
+		}
 		Component->AttachToComponent(Actor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
 		Actor->AddInstanceComponent(Component);
 		Component->RegisterComponent();
@@ -381,6 +532,10 @@ void FDecalBuilder::AttachToActor(AActor* Actor)
 	FTransform LocalRot(FRotator(-90, 0, 0));
 	for (FDecal& Decal : Decals)
 	{
+		if (!Decal.Trans.IsValid() || !IsFiniteUV(Decal.Size) || Decal.Size.X <= UE_DOUBLE_SMALL_NUMBER || Decal.Size.Y <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			continue;
+		}
 		UDecalComponent* Component = NewObject<UDecalComponent>(Actor);
 		Component->SetRelativeTransform(LocalRot * Decal.Trans);
 		Component->SetDecalMaterial(Decal.Material);

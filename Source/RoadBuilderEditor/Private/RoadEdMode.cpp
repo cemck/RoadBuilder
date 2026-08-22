@@ -30,9 +30,14 @@ IMPLEMENT_HIT_PROXY(HRoadMarkingProxy, HHitProxy);
 
 namespace
 {
-	void RebuildRoadMarkingMesh(URoadMarking* Marking)
+	bool IsOwnedRoadMarking(URoadMarking* Marking)
 	{
 		ARoadActor* Road = IsValid(Marking) ? Marking->GetRoad() : nullptr;
+		return IsValid(Road) && Road->Markings.Contains(Marking);
+	}
+
+	void RebuildRoadMarkingMesh(ARoadActor* Road)
+	{
 		if (!IsValid(Road))
 			return;
 
@@ -43,6 +48,16 @@ namespace
 				Slots = Scene->GetJunctionSlots(Road);
 		}
 		Road->BuildMesh(Slots);
+		if (AJunctionActor* Junction = Road->GetJunction(); IsValid(Junction))
+		{
+			Junction->Modify();
+			Junction->CaptureLinkOverrides();
+		}
+	}
+
+	void RebuildRoadMarkingMesh(URoadMarking* Marking)
+	{
+		RebuildRoadMarkingMesh(IsValid(Marking) ? Marking->GetRoad() : nullptr);
 	}
 }
 
@@ -321,6 +336,18 @@ bool FRoadTool::IsValidRoadPointSelection(const ARoadActor* Road, int32 PointInd
 bool FRoadTool::IsValidHeightPointSelection(const ARoadActor* Road, int32 PointIndex)
 {
 	return IsValid(Road) && Road->HeightPoints.IsValidIndex(PointIndex);
+}
+
+bool FRoadTool::IsValidBoundarySegmentSelection(const URoadBoundary* Boundary, int32 SegmentIndex)
+{
+	ARoadActor* Road = IsValid(Boundary) ? const_cast<URoadBoundary*>(Boundary)->GetRoad() : nullptr;
+	return IsValid(Road) && Road->Boundaries.Contains(Boundary) && Boundary->Segments.IsValidIndex(SegmentIndex);
+}
+
+bool FRoadTool::IsValidBoundaryOffsetSelection(const URoadBoundary* Boundary, int32 OffsetIndex)
+{
+	ARoadActor* Road = IsValid(Boundary) ? const_cast<URoadBoundary*>(Boundary)->GetRoad() : nullptr;
+	return IsValid(Road) && Road->Boundaries.Contains(Boundary) && Boundary->LocalOffsets.IsValidIndex(OffsetIndex);
 }
 
 bool FRoadTool::HandleClickJunction(HHitProxy* HitProxy, const FViewportClick& Click, int* GateIndex, int* LinkIndex)
@@ -1331,16 +1358,29 @@ void FRoadTool_LaneCarve::Render(const FSceneView* View, FViewport* Viewport, FP
 		DrawRoads(PDI, false);
 }
 
+bool FRoadTool_LaneWidth::ShouldDrawWidget() const
+{
+	return IsValidBoundaryOffsetSelection(CurrentBoundary, OffsetIndex);
+}
+
+void FRoadTool_LaneWidth::NotifyPreChange(FProperty* PropertyAboutToChange)
+{
+	if (IsValidBoundaryOffsetSelection(CurrentBoundary, OffsetIndex))
+	{
+		CurrentBoundary->Modify();
+	}
+}
+
 FVector FRoadTool_LaneWidth::GetWidgetLocation() const
 {
-	if (CurrentBoundary && OffsetIndex != INDEX_NONE)
+	if (IsValidBoundaryOffsetSelection(CurrentBoundary, OffsetIndex))
 		return CurrentBoundary->GetPos(CurrentBoundary->LocalOffsets[OffsetIndex].Dist);
 	return FRoadTool::GetWidgetLocation();
 }
 
 bool FRoadTool_LaneWidth::GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData)
 {
-	if (CurrentBoundary && OffsetIndex != INDEX_NONE)
+	if (IsValidBoundaryOffsetSelection(CurrentBoundary, OffsetIndex))
 	{
 		InMatrix = FRotationMatrix(CurrentBoundary->GetDir(CurrentBoundary->LocalOffsets[OffsetIndex].Dist).Rotation());
 		return true;
@@ -1387,15 +1427,24 @@ bool FRoadTool_LaneWidth::InputKey(FEditorViewportClient* ViewportClient, FViewp
 {
 	if (FRoadTool::InputKey(ViewportClient, Viewport, Key, Event))
 		return true;
-	if (Event == IE_Pressed && CurrentBoundary && OffsetIndex != INDEX_NONE)
+	if (Event == IE_Pressed && IsValidBoundaryOffsetSelection(CurrentBoundary, OffsetIndex))
 	{
-		ARoadActor* SelectedRoad = GetSelectedRoad();
 		if (Key == EKeys::Delete)
 		{
-			CurrentBoundary->DeleteOffset(OffsetIndex);
-			OffsetIndex = INDEX_NONE;
-			SelectedRoad->UpdateLanes();
-			SelectedRoad->GetScene()->Rebuild();		
+			URoadBoundary* EditedBoundary = CurrentBoundary;
+			ARoadActor* EditedRoad = EditedBoundary->GetRoad();
+			const int32 DeletedOffsetIndex = OffsetIndex;
+			const FScopedTransaction Transaction(LOCTEXT("DeleteLaneWidth", "Delete Lane Width Point"));
+			EditedRoad->Modify();
+			EditedBoundary->Modify();
+			// Detach FStructOnScope before RemoveAt can invalidate its address.
+			Reset();
+			EditedBoundary->DeleteOffset(DeletedOffsetIndex);
+			EditedRoad->UpdateLanes();
+			if (ARoadScene* Scene = EditedRoad->GetScene(); IsValid(Scene))
+			{
+				Scene->Rebuild();
+			}
 			return true;
 		}
 	}
@@ -1406,7 +1455,7 @@ bool FRoadTool_LaneWidth::InputDelta(FEditorViewportClient* InViewportClient, FV
 {
 	if (InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 	{
-		if (CurrentBoundary)
+		if (IsValidBoundaryOffsetSelection(CurrentBoundary, OffsetIndex))
 		{
 			FMatrix Mat = GLevelEditorModeTools().GetCustomDrawingCoordinateSystem();
 			FVector LocalDrag = Mat.InverseTransformVector(InDrag);
@@ -1459,16 +1508,29 @@ void FRoadTool_LaneWidth::Render(const FSceneView* View, FViewport* Viewport, FP
 		DrawRoads(PDI, false);
 }
 
+bool FRoadTool_MarkingLane::ShouldDrawWidget() const
+{
+	return IsValidBoundarySegmentSelection(CurrentBoundary, SegmentIndex);
+}
+
+void FRoadTool_MarkingLane::NotifyPreChange(FProperty* PropertyAboutToChange)
+{
+	if (IsValidBoundarySegmentSelection(CurrentBoundary, SegmentIndex))
+	{
+		CurrentBoundary->Modify();
+	}
+}
+
 FVector FRoadTool_MarkingLane::GetWidgetLocation() const
 {
-	if (CurrentBoundary)
+	if (IsValidBoundarySegmentSelection(CurrentBoundary, SegmentIndex))
 		return CurrentBoundary->GetPos(CurrentBoundary->SegmentStart(SegmentIndex));
 	return FRoadTool::GetWidgetLocation();
 }
 
 bool FRoadTool_MarkingLane::GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData)
 {
-	if (CurrentBoundary)
+	if (IsValidBoundarySegmentSelection(CurrentBoundary, SegmentIndex))
 	{
 		InMatrix = FRotationMatrix(CurrentBoundary->GetDir(CurrentBoundary->SegmentStart(SegmentIndex)).Rotation());
 		return true;
@@ -1515,12 +1577,11 @@ bool FRoadTool_MarkingLane::InputKey(FEditorViewportClient* ViewportClient, FVie
 {
 	if (FRoadTool::InputKey(ViewportClient, Viewport, Key, Event))
 		return true;
-	if (Event == IE_Pressed && CurrentBoundary && SegmentIndex != INDEX_NONE)
+	if (Event == IE_Pressed && IsValidBoundarySegmentSelection(CurrentBoundary, SegmentIndex))
 	{
-		ARoadActor* SelectedRoad = GetSelectedRoad();
 		if (Key == EKeys::Home)
 		{
-			if (CurrentBoundary->LeftLane->LeftBoundary)
+			if (IsValid(CurrentBoundary->LeftLane) && IsValid(CurrentBoundary->LeftLane->LeftBoundary))
 			{
 				CurrentBoundary = CurrentBoundary->LeftLane->LeftBoundary;
 				SegmentIndex = FMath::Min(SegmentIndex, CurrentBoundary->Segments.Num() - 1);
@@ -1530,7 +1591,7 @@ bool FRoadTool_MarkingLane::InputKey(FEditorViewportClient* ViewportClient, FVie
 		}
 		if (Key == EKeys::End)
 		{
-			if (CurrentBoundary->RightLane->RightBoundary)
+			if (IsValid(CurrentBoundary->RightLane) && IsValid(CurrentBoundary->RightLane->RightBoundary))
 			{
 				CurrentBoundary = CurrentBoundary->RightLane->RightBoundary;
 				SegmentIndex = FMath::Min(SegmentIndex, CurrentBoundary->Segments.Num() - 1);
@@ -1546,10 +1607,18 @@ bool FRoadTool_MarkingLane::InputKey(FEditorViewportClient* ViewportClient, FVie
 		}
 		if (Key == EKeys::Delete)
 		{
-			CurrentBoundary->DeleteSegment(SegmentIndex);
-			SelectedRoad->UpdateLanes();
-			SelectedRoad->GetScene()->Rebuild();
+			URoadBoundary* EditedBoundary = CurrentBoundary;
+			ARoadActor* EditedRoad = EditedBoundary->GetRoad();
+			const int32 DeletedSegmentIndex = SegmentIndex;
+			const FScopedTransaction Transaction(LOCTEXT("DeleteLaneMarking", "Delete Lane Marking Segment"));
+			EditedRoad->Modify();
+			EditedBoundary->Modify();
+			// The structure details view points directly into Segments. Detach it
+			// before RemoveAt, then keep this style-only action local to the road.
 			Reset();
+			EditedBoundary->DeleteSegment(DeletedSegmentIndex);
+			EditedRoad->UpdateLanes();
+			RebuildRoadMarkingMesh(EditedRoad);
 			return true;
 		}
 	}
@@ -1560,7 +1629,7 @@ bool FRoadTool_MarkingLane::InputDelta(FEditorViewportClient* InViewportClient, 
 {
 	if (InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 	{
-		if (CurrentBoundary)
+		if (IsValidBoundarySegmentSelection(CurrentBoundary, SegmentIndex))
 		{
 			FMatrix Mat = GLevelEditorModeTools().GetCustomDrawingCoordinateSystem();
 			FVector LocalDrag = Mat.InverseTransformVector(InDrag);
@@ -1603,16 +1672,21 @@ void FRoadTool_MarkingLane::Render(const FSceneView* View, FViewport* Viewport, 
 		DrawRoads(PDI, true);
 }
 
+bool FRoadTool_MarkingPoint::ShouldDrawWidget() const
+{
+	return IsOwnedRoadMarking(CurrentMarking);
+}
+
 FVector FRoadTool_MarkingPoint::GetWidgetLocation() const
 {
-	if (CurrentMarking)
+	if (IsOwnedRoadMarking(CurrentMarking))
 		return CurrentMarking->GetRoad()->GetPos(CurrentMarking->Point);
 	return FRoadTool::GetWidgetLocation();
 }
 
 bool FRoadTool_MarkingPoint::GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData)
 {
-	if (CurrentMarking)
+	if (IsOwnedRoadMarking(CurrentMarking))
 	{
 		InMatrix = FRotationMatrix(CurrentMarking->GetRoad()->GetDir(CurrentMarking->Point.X).Rotation());
 		return true;
@@ -1654,14 +1728,18 @@ bool FRoadTool_MarkingPoint::InputKey(FEditorViewportClient* ViewportClient, FVi
 {
 	if (FRoadTool::InputKey(ViewportClient, Viewport, Key, Event))
 		return true;
-	if (Event == IE_Pressed && CurrentMarking)
+	if (Event == IE_Pressed && IsOwnedRoadMarking(CurrentMarking))
 	{
 		if (Key == EKeys::Delete)
 		{
-			ARoadActor* SelectedRoad = GetSelectedRoad();
-			SelectedRoad->DeleteMarking(CurrentMarking);
-			CurrentMarking = nullptr;
-			SelectedRoad->GetScene()->Rebuild();
+			UMarkingPoint* DeletedMarking = CurrentMarking;
+			ARoadActor* MarkingRoad = DeletedMarking->GetRoad();
+			const FScopedTransaction Transaction(LOCTEXT("DeleteMarkingPoint", "Delete Marking Point"));
+			MarkingRoad->Modify();
+			DeletedMarking->Modify();
+			Reset();
+			MarkingRoad->DeleteMarking(DeletedMarking);
+			RebuildRoadMarkingMesh(MarkingRoad);
 			return true;
 		}
 	}
@@ -1672,7 +1750,7 @@ bool FRoadTool_MarkingPoint::InputDelta(FEditorViewportClient* InViewportClient,
 {
 	if (InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 	{
-		if (CurrentMarking)
+		if (IsOwnedRoadMarking(CurrentMarking))
 		{
 			FMatrix Mat = GLevelEditorModeTools().GetCustomDrawingCoordinateSystem();
 			FVector LocalDrag = Mat.InverseTransformVector(InDrag);
@@ -1685,13 +1763,39 @@ bool FRoadTool_MarkingPoint::InputDelta(FEditorViewportClient* InViewportClient,
 	return false;
 }
 
+bool FRoadTool_MarkingLane::EndModify()
+{
+	if (LazyRebuild)
+	{
+		LazyRebuild = false;
+		if (!GIsTransacting && IsValidBoundarySegmentSelection(CurrentBoundary, SegmentIndex))
+		{
+			ARoadActor* Road = CurrentBoundary->GetRoad();
+			Road->UpdateLanes();
+			RebuildRoadMarkingMesh(Road);
+		}
+	}
+	return true;
+}
+
+bool FRoadTool_MarkingPoint::EndModify()
+{
+	if (LazyRebuild)
+	{
+		LazyRebuild = false;
+		if (!GIsTransacting && IsOwnedRoadMarking(CurrentMarking))
+			RebuildRoadMarkingMesh(CurrentMarking);
+	}
+	return true;
+}
+
 void FRoadTool_MarkingPoint::Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI)
 {
 	auto Draw = [&](ARoadActor* Road)
 	{
 		for (URoadMarking* Marking : Road->Markings)
 		{
-			if (UMarkingPoint* MarkingPoint = Cast<UMarkingPoint>(Marking))
+			if (UMarkingPoint* MarkingPoint = Cast<UMarkingPoint>(Marking); IsOwnedRoadMarking(MarkingPoint))
 			{
 				PDI->SetHitProxy(new HRoadMarkingProxy(MarkingPoint));
 				PDI->DrawPoint(MarkingPoint->GetRoad()->GetPos(MarkingPoint->Point), Marking == CurrentMarking ? Color_Select : Color_Line, Size_Point, SDPG_Foreground);
@@ -1704,9 +1808,15 @@ void FRoadTool_MarkingPoint::Render(const FSceneView* View, FViewport* Viewport,
 		DrawRoads(PDI, true);
 }
 
+bool FRoadTool_MarkingCurve::ShouldDrawWidget() const
+{
+	return IsOwnedRoadMarking(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints &&
+		(PointIndex == INDEX_NONE ? !CurrentMarking->Points.IsEmpty() : CurrentMarking->Points.IsValidIndex(PointIndex));
+}
+
 FVector FRoadTool_MarkingCurve::GetWidgetLocation() const
 {
-	if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
+	if (IsOwnedRoadMarking(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
 	{
 		ARoadActor* Road = CurrentMarking->GetRoad();
 		if (IsValid(Road))
@@ -1722,7 +1832,7 @@ FVector FRoadTool_MarkingCurve::GetWidgetLocation() const
 
 bool FRoadTool_MarkingCurve::GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData)
 {
-	if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
+	if (IsOwnedRoadMarking(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
 	{
 		ARoadActor* Road = CurrentMarking->GetRoad();
 		if (IsValid(Road))
@@ -1787,7 +1897,7 @@ bool FRoadTool_MarkingCurve::HandleClick(FEditorViewportClient* InViewportClient
 		const FScopedTransaction Transaction(LOCTEXT("MarkingCurve", "MarkingCurve"));
 		HRoadMarkingProxy* Proxy = HitProxyCast<HRoadMarkingProxy>(HitProxy);
 		bool bMarkingChanged = false;
-		if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && CurrentMarking->IsEndPoint(PointIndex))
+		if (IsOwnedRoadMarking(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && CurrentMarking->IsEndPoint(PointIndex))
 		{
 			if (Proxy)
 			{
@@ -1830,7 +1940,7 @@ bool FRoadTool_MarkingCurve::InputKey(FEditorViewportClient* ViewportClient, FVi
 {
 	if (FRoadTool::InputKey(ViewportClient, Viewport, Key, Event))
 		return true;
-	if (Event == IE_Pressed && IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints)
+	if (Event == IE_Pressed && IsOwnedRoadMarking(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints)
 	{
 		if (Key == EKeys::Delete)
 		{
@@ -1840,15 +1950,13 @@ bool FRoadTool_MarkingCurve::InputKey(FEditorViewportClient* ViewportClient, FVi
 				Reset();
 				return true;
 			}
-			MarkingRoad->DeleteMarking(CurrentMarking);
-			CurrentMarking = nullptr;
-			TArray<FJunctionSlot> Slots;
-			if (!MarkingRoad->IsLink())
-			{
-				if (ARoadScene* MarkingScene = MarkingRoad->GetScene(); IsValid(MarkingScene))
-					Slots = MarkingScene->GetJunctionSlots(MarkingRoad);
-			}
-			MarkingRoad->BuildMesh(Slots);
+			UMarkingCurve* DeletedMarking = CurrentMarking;
+			const FScopedTransaction Transaction(LOCTEXT("DeleteMarkingCurve", "Delete Marking Curve"));
+			MarkingRoad->Modify();
+			DeletedMarking->Modify();
+			Reset();
+			MarkingRoad->DeleteMarking(DeletedMarking);
+			RebuildRoadMarkingMesh(MarkingRoad);
 			return true;
 		}
 	}
@@ -1859,7 +1967,7 @@ bool FRoadTool_MarkingCurve::InputDelta(FEditorViewportClient* InViewportClient,
 {
 	if (InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 	{
-		if (IsValid(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
+		if (IsOwnedRoadMarking(CurrentMarking) && !CurrentMarking->bUseGeneratedWorldPoints && !CurrentMarking->Points.IsEmpty())
 		{
 			FMatrix Mat = GLevelEditorModeTools().GetCustomDrawingCoordinateSystem();
 			FVector LocalDrag = Mat.InverseTransformVector(InDrag);
@@ -1895,7 +2003,7 @@ void FRoadTool_MarkingCurve::Render(const FSceneView* View, FViewport* Viewport,
 	{
 		for (URoadMarking* Marking : Road->Markings)
 		{
-			if (UMarkingCurve* MarkingCurve = Cast<UMarkingCurve>(Marking); IsValid(MarkingCurve))
+			if (UMarkingCurve* MarkingCurve = Cast<UMarkingCurve>(Marking); IsOwnedRoadMarking(MarkingCurve))
 			{
 				PDI->SetHitProxy(MarkingCurve->bUseGeneratedWorldPoints ? nullptr : new HRoadMarkingProxy(Marking, INDEX_NONE));
 				DrawCurve(PDI, MarkingCurve->CreatePolyline(), CurrentMarking == Marking ? Color_Select : Color_Line, Thickness_Road);

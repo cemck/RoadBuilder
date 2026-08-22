@@ -34,7 +34,6 @@ USettings_Global::USettings_Global(const FObjectInitializer& ObjectInitializer) 
 	DisplayGateRadianPoints = 0;
 	DisplayGoreDiagnostics = 1;
 }
-
 USettings_OSM::USettings_OSM(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	ConnectRoads = 1;

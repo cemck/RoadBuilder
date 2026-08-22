@@ -364,6 +364,10 @@ public:
 	void UpdateCurve(TSet<ARoadActor*>& UpdatedRoads);
 	void UpdateCurveBySegments();
 	void UpdateLanes();
+	/** Validates authored points before a topology or mesh action mutates this road. */
+	bool HasSafeAuthoredCurve(FString* OutFailureReason = nullptr) const;
+	/** Validates derived road/height segments before handing geometry to the renderer. */
+	bool HasSafeDerivedGeometry(FString* OutFailureReason = nullptr) const;
 	void BuildMesh(const TArray<FJunctionSlot>& Slots);
 	bool IsLink();
 	bool IsRamp();
@@ -386,10 +390,16 @@ public:
 	double LeftWidth() { return 800; }
 	double RightWidth() { return 800; }
 	double Length() { return RoadSegments.Num() ? RoadSegments.Last().Dist + RoadSegments.Last().Length : 0; }
+	void SetOwningScene(ARoadScene* Scene);
+	void SetOwningJunction(AJunctionActor* Junction);
+	void RegisterGeneratedChild(AActor* Actor);
+	void ClearGeneratedChildren();
+	void SynchronizeWorldPartitionChildren();
 	ARoadScene* GetScene();
 	AJunctionActor* GetJunction();
 	void ExportXodr(FXmlNode* XmlNode, int& RoadId, int& ObjectId, int JunctionId);
 	virtual void Serialize(FArchive& Ar) override;
+	virtual void Destroyed() override;
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent);
 	virtual void PreEditUndo() override;
@@ -435,6 +445,18 @@ public:
 
 	UPROPERTY(VisibleAnywhere, Category = "Road|Streaming")
 	TArray<FCrossRoadSceneConnection> CrossRoadSceneConnections;
+
+	/** Soft ownership avoids an OFPA child package importing its RoadScene. */
+	UPROPERTY()
+	TSoftObjectPtr<ARoadScene> OwningScene;
+
+	/** Soft ownership avoids a generated junction-link package importing its junction. */
+	UPROPERTY()
+	TSoftObjectPtr<AJunctionActor> OwningJunction;
+
+	/** Generated blueprint props are detached in World Partition and cleaned explicitly. */
+	UPROPERTY()
+	TArray<TSoftObjectPtr<AActor>> GeneratedChildren;
 };
 
 UCLASS()

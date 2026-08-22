@@ -176,6 +176,156 @@ struct FJunctionGate
 	TArray<FJunctionLink> Links;
 };
 
+/** A boundary segment expressed relative to its junction-link length. */
+USTRUCT()
+struct FJunctionBoundarySegmentOverride
+{
+	GENERATED_USTRUCT_BODY()
+
+	/** [0, 1] along the generated junction connector. */
+	UPROPERTY()
+	double NormalizedDist = 0.0;
+
+	UPROPERTY()
+	ULaneMarkStyle* LaneMarking = nullptr;
+
+	UPROPERTY()
+	URoadProps* Props = nullptr;
+};
+
+/** Marking/prop styling for one generated connector boundary. */
+USTRUCT()
+struct FJunctionBoundaryOverride
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY()
+	int32 BoundaryIndex = INDEX_NONE;
+
+	UPROPERTY()
+	TArray<FJunctionBoundarySegmentOverride> Segments;
+};
+
+/** An authored point marking stored in connector-relative coordinates. */
+USTRUCT()
+struct FJunctionPointMarkingOverride
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY()
+	UStaticMesh* Mesh = nullptr;
+
+	UPROPERTY()
+	double NormalizedDistance = 0.0;
+
+	UPROPERTY()
+	double LateralOffset = 0.0;
+};
+
+/** An authored curve control point stored in connector-relative coordinates. */
+USTRUCT()
+struct FJunctionMarkingCurvePointOverride
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY()
+	double NormalizedDistance = 0.0;
+
+	UPROPERTY()
+	double LateralOffset = 0.0;
+
+	UPROPERTY()
+	double NormalizedInDistance = 0.0;
+
+	UPROPERTY()
+	double InLateralOffset = 0.0;
+
+	UPROPERTY()
+	double NormalizedOutDistance = 0.0;
+
+	UPROPERTY()
+	double OutLateralOffset = 0.0;
+};
+
+/** A user-authored marking attached to a junction connector. */
+USTRUCT()
+struct FJunctionAuthoredMarkingOverride
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY()
+	bool bIsPointMarking = false;
+
+	UPROPERTY()
+	FJunctionPointMarkingOverride Point;
+
+	UPROPERTY()
+	UBaseMarkStyle* MarkStyle = nullptr;
+
+	UPROPERTY()
+	UPolygonMarkStyle* FillStyle = nullptr;
+
+	UPROPERTY()
+	double Orientation = 0.0;
+
+	UPROPERTY()
+	bool bClosedLoop = false;
+
+	UPROPERTY()
+	TArray<FJunctionMarkingCurvePointOverride> CurvePoints;
+};
+
+/** Style-only record for a generated gore polygon. Its geometry still regenerates. */
+USTRUCT()
+struct FJunctionGeneratedMarkingOverride
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY()
+	UPolygonMarkStyle* FillStyle = nullptr;
+
+	UPROPERTY()
+	double Orientation = 0.0;
+};
+
+/**
+ * Durable authored state for one directed junction link.  It is keyed by the
+ * two source gates rather than by a generated actor, because connector actors
+ * are intentionally destroyed and recreated when junction topology changes.
+ */
+USTRUCT()
+struct FJunctionLinkOverride
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY()
+	ARoadActor* InputRoad = nullptr;
+
+	UPROPERTY()
+	ARoadActor* OutputRoad = nullptr;
+
+	UPROPERTY()
+	double InputGateInitDist = 0.0;
+
+	UPROPERTY()
+	double OutputGateInitDist = 0.0;
+
+	UPROPERTY()
+	int32 LinkIndex = INDEX_NONE;
+
+	UPROPERTY()
+	double Radius = 1000.0;
+
+	UPROPERTY()
+	TArray<FJunctionBoundaryOverride> Boundaries;
+
+	UPROPERTY()
+	TArray<FJunctionAuthoredMarkingOverride> AuthoredMarkings;
+
+	UPROPERTY()
+	TArray<FJunctionGeneratedMarkingOverride> GeneratedMarkings;
+};
+
 struct FJunctionSlot
 {
 	FJunctionGate& InputGate() const;
@@ -258,6 +408,10 @@ public:
 	bool IsTurnAllowed(int FromGate, int ToGate) const;
 	void AddTurnRestriction(int FromGate, int ToGate);
 	void RemoveTurnRestriction(int FromGate, int ToGate);
+	void SetOwningScene(ARoadScene* Scene);
+	void RegisterGeneratedChild(AActor* Actor);
+	void ClearGeneratedChildren();
+	void SynchronizeWorldPartitionChildren();
 	ARoadScene* GetScene();
 	void ExportXodr(FXmlNode* XmlNode, int& RoadId, int& ObjectId);
 	virtual void Destroyed();
@@ -284,10 +438,30 @@ public:
 	void CleanupTrafficControl();
 	void GenerateTurnArrows();
 	void CleanupTurnArrows();
+	/** Snapshot styling before a rebuild may replace generated link actors. */
+	void CaptureLinkOverrides();
+	/** Restore styling after regenerated link geometry and gore polygons exist. */
+	void ApplyLinkOverrides();
+	/** Preserve compatible link overrides when two generated junctions merge. */
+	void AbsorbLinkOverrides(const AJunctionActor* Other);
 
 	TArray<FVector> DebugPoints;
 	TArray<FPolyline> DebugCurves;
 	TArray<FGoreDiagnostic> GoreDiagnostics;
+	/** Source triangles emitted by the most recent accepted junction build. */
+	int32 LastBuildTriangleCount = 0;
+
+	/** Saved automatically from junction-link edits; not editable as a preset. */
+	UPROPERTY()
+	TArray<FJunctionLinkOverride> PersistentLinkOverrides;
+
+	/** Soft ownership prevents this OFPA junction package from importing the RoadScene. */
+	UPROPERTY()
+	TSoftObjectPtr<ARoadScene> OwningScene;
+
+	/** Detached World Partition children still need an explicit deletion path. */
+	UPROPERTY()
+	TArray<TSoftObjectPtr<AActor>> GeneratedChildren;
 };
 
 UCLASS(BlueprintType, Blueprintable)
@@ -389,6 +563,10 @@ public:
 
 	UPROPERTY()
 	ERoadTrafficHandedness LastBuiltTrafficHandedness = ERoadTrafficHandedness::RightHandTraffic;
+
+	/** Prevents nested property callbacks from rebuilding a partially regenerated graph. */
+	UPROPERTY(Transient)
+	bool bIsRebuilding = false;
 
 	TOctree2<FRoadOctreeElement, FRoadOctreeSemantics> Octree;
 };
