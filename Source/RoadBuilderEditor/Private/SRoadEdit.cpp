@@ -315,7 +315,7 @@ void SRoadEdit::SetEditHeightPoint(ARoadActor* Road, int Index)
 	if (IsValid(Road) && Road->HeightPoints.IsValidIndex(Index))
 	{
 		StructDetailsView->SetStructureData(MakeShareable(new FStructOnScope(FHeightPoint::StaticStruct(), (uint8*)&Road->HeightPoints[Index])));
-		StructDetailsView->GetOnFinishedChangingPropertiesDelegate().AddSP(this, &SRoadEdit::OnRoadPointPropertyChanged, Road, Index);
+		StructDetailsView->GetOnFinishedChangingPropertiesDelegate().AddSP(this, &SRoadEdit::OnHeightPointPropertyChanged, Road, Index);
 	}
 	else
 		StructDetailsView->SetStructureData(MakeShareable(new FStructOnScope(nullptr, 0)));
@@ -434,6 +434,19 @@ void SRoadEdit::OnRoadPointPropertyChanged(const FPropertyChangedEvent& Property
 {
 	Road->UpdateCurve();
 	Road->GetScene()->Rebuild();
+}
+
+void SRoadEdit::OnHeightPointPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, ARoadActor* Road, int Index)
+{
+	if (!IsValid(Road))
+	{
+		return;
+	}
+	Road->UpdateCurve();
+	if (ARoadScene* Scene = Road->GetScene(); IsValid(Scene))
+	{
+		Scene->RebuildHeightOnly(Road);
+	}
 }
 
 void SRoadEdit::OnLinkPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, AJunctionActor* Junction, int Gate, int Link)

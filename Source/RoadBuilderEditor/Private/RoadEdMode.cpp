@@ -824,7 +824,10 @@ bool FRoadTool_RoadHeight::HandleClick(FEditorViewportClient* InViewportClient, 
 					EditWidget->SetEditHeightPoint(SelectedRoad, PointIndex);
 				}
 				SelectedRoad->UpdateCurve();
-				GetScene()->Rebuild();
+				if (ARoadScene* Scene = SelectedRoad->GetScene(); IsValid(Scene))
+				{
+					Scene->RebuildHeightOnly(SelectedRoad);
+				}
 				return true;
 			}
 		}
@@ -843,9 +846,15 @@ bool FRoadTool_RoadHeight::InputKey(FEditorViewportClient* ViewportClient, FView
 			ARoadActor* SelectedRoad = GetSelectedRoad();
 			if (IsValidHeightPointSelection(SelectedRoad, PointIndex))
 			{
+				const FScopedTransaction Transaction(LOCTEXT("DeleteRoadHeight", "Delete Road Height Point"));
+				SelectedRoad->Modify();
 				SelectedRoad->HeightPoints.RemoveAt(PointIndex);
 				PointIndex = INDEX_NONE;
-				GetScene()->Rebuild();
+				SelectedRoad->UpdateCurve();
+				if (ARoadScene* Scene = SelectedRoad->GetScene(); IsValid(Scene))
+				{
+					Scene->RebuildHeightOnly(SelectedRoad);
+				}
 			}
 			return true;
 		}
@@ -868,6 +877,25 @@ bool FRoadTool_RoadHeight::InputDelta(FEditorViewportClient* InViewportClient, F
 		return true;
 	}
 	return false;
+}
+
+bool FRoadTool_RoadHeight::EndModify()
+{
+	if (LazyRebuild)
+	{
+		LazyRebuild = false;
+		if (!GIsTransacting)
+		{
+			if (ARoadActor* Road = GetSelectedRoad(); IsValid(Road))
+			{
+				if (ARoadScene* Scene = Road->GetScene(); IsValid(Scene))
+				{
+					Scene->RebuildHeightOnly(Road);
+				}
+			}
+		}
+	}
+	return true;
 }
 
 void FRoadTool_RoadHeight::Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI)

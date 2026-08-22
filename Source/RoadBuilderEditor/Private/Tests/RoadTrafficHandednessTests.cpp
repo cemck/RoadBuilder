@@ -532,6 +532,54 @@ bool FRoadBuilderRampSnappingAndForkTopologyTest::RunTest(const FString& Paramet
 		TestTrue(
 			FString::Printf(TEXT("The %s junction links survive a marking-only Apply/Rebuild"), HandednessName),
 			PreservedLinkCount > 0);
+
+		// Elevation edits use a narrower path than XY/topology edits. Verify that
+		// this path keeps both lane-boundary overrides and authored marking UObject
+		// identity while updating the road's height curve.
+		ARoadActor* HeightTestLinkRoad = EditedLinkRoads.IsEmpty() ? nullptr : EditedLinkRoads[0].Get();
+		UMarkingPoint* HeightTestAuthoredMarking = IsValid(HeightTestLinkRoad)
+			? HeightTestLinkRoad->AddMarkingPoint(FVector2D(HeightTestLinkRoad->Length() * 0.5, 0.0))
+			: nullptr;
+		const int32 GoreDiagnosticCountBeforeHeightChange = Scene->Junctions.IsEmpty() || !IsValid(Scene->Junctions[0])
+			? 0
+			: Scene->Junctions[0]->GoreDiagnostics.Num();
+		const double NewParentEndHeight = ParentRoad->GetHeight(ParentRoad->Length()) + 500.0;
+		ParentRoad->HeightPoints.Last().Height = NewParentEndHeight;
+		ParentRoad->UpdateCurve();
+		Scene->RebuildHeightOnly(ParentRoad);
+		TestEqual(
+			FString::Printf(TEXT("The %s height-only rebuild applies the edited elevation"), HandednessName),
+			ParentRoad->GetHeight(ParentRoad->Length()),
+			NewParentEndHeight);
+		TestTrue(
+			FString::Printf(TEXT("The %s height-only rebuild preserves an authored junction marking object"), HandednessName),
+			IsValid(HeightTestLinkRoad) && IsValid(HeightTestAuthoredMarking) &&
+				HeightTestLinkRoad->Markings.Contains(HeightTestAuthoredMarking));
+		TestEqual(
+			FString::Printf(TEXT("The %s height-only rebuild does not regenerate gore diagnostics"), HandednessName),
+			Scene->Junctions.IsEmpty() || !IsValid(Scene->Junctions[0]) ? 0 : Scene->Junctions[0]->GoreDiagnostics.Num(),
+			GoreDiagnosticCountBeforeHeightChange);
+		for (const TWeakObjectPtr<ARoadActor>& EditedLinkRoad : EditedLinkRoads)
+		{
+			if (!EditedLinkRoad.IsValid())
+				continue;
+			for (URoadBoundary* Boundary : EditedLinkRoad->Boundaries)
+			{
+				if (!IsValid(Boundary))
+					continue;
+				for (const FBoundarySegment& Segment : Boundary->Segments)
+				{
+					TestEqual(
+						FString::Printf(TEXT("A %s junction marking override survives a height-only rebuild"), HandednessName),
+						Segment.LaneMarking,
+						JunctionMarkingOverride);
+					TestEqual(
+						FString::Printf(TEXT("A %s junction outer-props override survives a height-only rebuild"), HandednessName),
+						Segment.Props,
+						JunctionPropsOverride);
+				}
+			}
+		}
 		// This endpoint-snapping fixture can legitimately collapse a connector to
 		// zero length.  It verifies selection/topology and diagnostics; actual
 		// world-space wedge rendering is covered by GeneratedWorldGoreWedge.

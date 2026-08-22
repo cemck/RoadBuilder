@@ -241,7 +241,7 @@ class ROADBUILDER_API AJunctionActor : public AActor
 public:
 	static const int CornerIndex = 1;
 	void AddRoad(ARoadActor* Road, double Dist);
-	void Build();
+	void Build(bool bRegenerateDerivedMarkings = true);
 	void BuildGoreMarkings();
 	void BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Index);
 	bool Contains(ARoadActor* Road, double Dist);
@@ -343,6 +343,11 @@ public:
 	TArray<FJunctionSlot> GetJunctionSlots(ARoadActor* Road);
 //	FVector2D GetRoadUV(ARoadActor* Road, const FVector& Pos);
 	void Rebuild();
+	/**
+	 * Refresh elevation-dependent road and junction meshes without resolving
+	 * junction topology or recreating generated/authored junction markings.
+	 */
+	void RebuildHeightOnly(ARoadActor* ChangedRoad);
 	void RemoveInvalidReferences();
 	void GenerateGrounds(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots);
 	void GenerateMassGraph(TMap<ARoadActor*, TArray<FJunctionSlot>>& RoadSlots);

@@ -609,7 +609,7 @@ void AJunctionActor::BuildLink(FJunctionGate& Gate, FJunctionGate& Next, int Ind
 		Link.Road->UpdateCurveBySegments();
 }
 
-void AJunctionActor::Build()
+void AJunctionActor::Build(bool bRegenerateDerivedMarkings)
 {
 	for (int i = 0; i < Gates.Num(); i++)
 	{
@@ -681,7 +681,14 @@ void AJunctionActor::Build()
 			}
 		}
 	}
-	BuildGoreMarkings();
+	// Height-only edits must keep the exact authored and generated marking
+	// objects already present on junction links. Their meshes are projected onto
+	// the rebuilt junction surface below, so regenerating their geometry is not
+	// necessary when only Z/elevation changed.
+	if (bRegenerateDerivedMarkings)
+	{
+		BuildGoreMarkings();
+	}
 	FRoadMesh Builder;
 	TArray<FVector> Points;
 	TArray<FVector> CornerPoints;
@@ -2114,6 +2121,108 @@ void ARoadScene::Rebuild()
 	}
 	bTrafficHandednessInitialized = true;
 	LastBuiltTrafficHandedness = ResolvedTrafficHandedness;
+}
+
+void ARoadScene::RebuildHeightOnly(ARoadActor* ChangedRoad)
+{
+	if (!IsValid(ChangedRoad))
+	{
+		return;
+	}
+
+	// UpdateCurve propagates elevation changes into directly connected child
+	// roads, including children owned by another loaded World Partition sector.
+	// Follow the same explicit connections so every affected mesh is refreshed
+	// without running junction discovery again.
+	TSet<ARoadActor*> AffectedRoads;
+	AffectedRoads.Add(ChangedRoad);
+	bool bAddedConnectedChild = true;
+	while (bAddedConnectedChild)
+	{
+		bAddedConnectedChild = false;
+		TArray<ARoadActor*> ParentRoads;
+		ParentRoads.Reserve(AffectedRoads.Num());
+		for (ARoadActor* Road : AffectedRoads)
+		{
+			ParentRoads.Add(Road);
+		}
+		for (ARoadActor* ParentRoad : ParentRoads)
+		{
+			if (!IsValid(ParentRoad))
+			{
+				continue;
+			}
+			for (const FConnectInfo& Connection : ParentRoad->ConnectedChildren)
+			{
+				if (IsValid(Connection.Child) && !AffectedRoads.Contains(Connection.Child))
+				{
+					AffectedRoads.Add(Connection.Child);
+					bAddedConnectedChild = true;
+				}
+			}
+		}
+	}
+
+	TSet<ARoadScene*> AffectedScenes;
+	AffectedScenes.Add(this);
+	for (ARoadActor* Road : AffectedRoads)
+	{
+		if (IsValid(Road))
+		{
+			if (ARoadScene* Scene = Road->GetScene(); IsValid(Scene))
+			{
+				AffectedScenes.Add(Scene);
+			}
+		}
+	}
+	for (ARoadScene* Scene : AffectedScenes)
+	{
+		Scene->RemoveInvalidReferences();
+	}
+
+	TSet<AJunctionActor*> AffectedJunctions;
+	for (ARoadScene* Scene : AffectedScenes)
+	{
+		for (AJunctionActor* Junction : Scene->Junctions)
+		{
+			if (!IsValid(Junction))
+			{
+				continue;
+			}
+			for (const FJunctionGate& Gate : Junction->Gates)
+			{
+				if (AffectedRoads.Contains(Gate.Road))
+				{
+					AffectedJunctions.Add(Junction);
+					break;
+				}
+			}
+		}
+	}
+
+	if (AJunctionActor* OwningJunction = ChangedRoad->GetJunction(); IsValid(OwningJunction))
+	{
+		AffectedJunctions.Add(OwningJunction);
+	}
+
+	for (AJunctionActor* Junction : AffectedJunctions)
+	{
+		// Existing link styles, lane markings, outer props and gore curves are
+		// retained. BuildLink only refreshes the derived curves/height segments.
+		Junction->Build(false);
+	}
+
+	for (ARoadActor* Road : AffectedRoads)
+	{
+		if (!IsValid(Road))
+		{
+			continue;
+		}
+		ARoadScene* OwningScene = Road->GetScene();
+		Road->BuildMesh(Road->IsLink() || !IsValid(OwningScene)
+			? TArray<FJunctionSlot>()
+			: OwningScene->GetJunctionSlots(Road));
+	}
 }
 
 void ARoadScene::RemoveInvalidReferences()

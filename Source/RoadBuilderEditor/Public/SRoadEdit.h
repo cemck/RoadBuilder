@@ -40,6 +40,7 @@ public:
 	void SetEditMarkingCurve(UMarkingCurve* Marking, int Index);
 	void SetEditGround(AGroundActor* Ground, int Index);
 	void OnRoadPointPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, ARoadActor* Road, int Index);
+	void OnHeightPointPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, ARoadActor* Road, int Index);
 	void OnLinkPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, AJunctionActor* Junction, int Gate, int Link);
 	void OnLaneSegmentPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, URoadLane* Lane, int Index);
 	void OnBoundaryOffsetPropertyChanged(const FPropertyChangedEvent& PropertyChangedEvent, URoadBoundary* Boundary, int Index);
